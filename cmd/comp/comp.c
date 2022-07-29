@@ -411,7 +411,7 @@ int findwild (struct dos_fcb fcb)
 void wrerr (void)
 {
  int p;
-
+ 
  for (p=0; errtab[p].err; p++)
  {
   if (errtab[p].err==dos_errno) break;
@@ -494,8 +494,8 @@ int do_it2 (char *source, char *target)
  {
   byte temp;
   
-  dos_close(handle1);
   temp=dos_errno;
+  dos_close(handle1);
   dos_puts(target);
   dos_puts(e_dash);
   dos_errno=temp;
@@ -616,6 +616,7 @@ int do_it1 (char *source, char *tgtmask)
  }
  c=7;
  while (fcb2.filename[c]==' ') c--;
+ c++;
  memset(minibuf, 0, 13);
  for (t=0; t<c; t++) minibuf[t]=fcb2.filename[t];
  strcat(minibuf, ".");
@@ -629,6 +630,7 @@ int do_it1 (char *source, char *tgtmask)
  
  strcpy(fnbuf4, tgtmask);
  ptr=basename(fnbuf4);
+ *ptr=0;
  if (ptr!=fnbuf4) strcpy(ptr, "\\");
  strcat(ptr, minibuf);
  return do_it2(source, fnbuf4);
@@ -695,7 +697,7 @@ args2:
    
    dos_findnext(&ffblk);
   }
-  if (dos_errno!=12)
+  if (dos_errno&(dos_errno!=12))
   {
    byte tmp;
    
