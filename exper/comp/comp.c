@@ -30,7 +30,8 @@
  */
 
 /*
- * This code is untested, but I decided to put it in revision control anyway.
+ * This program mostly works, but it has issues when wildcards are used in the
+ * target mask (and wildcards in the source mask are untested).
  * 
  * It is not based on the enhanced DOS 5 version of COMP, but the PC DOS 2.0
  * version, which means no switches.
@@ -47,10 +48,10 @@ typedef unsigned short word;
 typedef unsigned long  dword;
 
 const byte *e_args   = "Too many parameters\r\n",
-           *e_ten    = "10 mismatches - terminating compare\r\n",
+           *e_ten    = "\r\n10 mismatches - terminating compare\r\n",
            *e_head   = "Comparing ",
            *e_and    = " and ",
-           *e_diff   = "Compare error at offset ",
+           *e_diff   = "\r\nCompare error at offset ",
            *e_file1  = "File 1 = ",
            *e_file2  = "File 2 = ",
            *e_noeof  = "EOF mark not found\r\n",
@@ -60,7 +61,7 @@ const byte *e_args   = "Too many parameters\r\n",
            *e_first  = "\r\nEnter primary file name\r\n",
            *e_second = "\r\nEnter second file name or drive ID\r\n",
            *e_size   = "Files are different sizes\r\n",
-           *e_more   = "Compare more files (Y/N)? ",
+           *e_more   = "\r\nCompare more files (Y/N)? ",
 #ifdef HELP
            *e_help   =
 "Compares the contents of two files or sets of files.\r\n\r\n"
@@ -208,6 +209,7 @@ int dos_read (int handle, void *buf, unsigned len)
  _asm mov cx, len;
  _asm mov dx, buf;
  _asm int 0x21;
+ _asm mov r, ax;
  _asm lahf;
  _asm mov flags, ah;
  if (flags&1)
@@ -216,7 +218,6 @@ int dos_read (int handle, void *buf, unsigned len)
   return 0;
  }
  dos_errno=0;
- _asm mov r, ax;
  return r;
 }
 
@@ -229,6 +230,7 @@ int dos_write (int handle, const void *buf, int len)
  _asm mov cx, len;
  _asm mov dx, buf;
  _asm int 0x21;
+ _asm mov r, ax;
  _asm lahf;
  _asm mov flags, ah;
  if (flags&1)
@@ -237,7 +239,6 @@ int dos_write (int handle, const void *buf, int len)
   return 0;
  }
  dos_errno=0;
- _asm mov r, ax;
  return r;
 }
 
@@ -254,6 +255,8 @@ long dos_lseek (int handle, long pos, char mode)
  _asm mov cx, a;
  _asm mov dx, b;
  _asm int 0x21;
+ _asm mov a, dx;
+ _asm mov b, ax;
  _asm lahf;
  _asm mov flags, ah;
  if (flags&1)
@@ -261,8 +264,6 @@ long dos_lseek (int handle, long pos, char mode)
   _asm mov dos_errno, ax;
   return -1;
  }
- _asm mov a, dx;
- _asm mov b, ax;
  c=a;
  c<<=16;
  c|=b;
@@ -473,6 +474,7 @@ int do_it2 (char *source, char *target)
  dos_puts(e_crlf);
  
  e=0;
+ tally=0;
  
  handle1=dos_open(source, 0);
  if (!handle1)
@@ -487,7 +489,7 @@ int do_it2 (char *source, char *target)
   return -1;
  }
  
- handle2=dos_open(source, 0);
+ handle2=dos_open(target, 0);
  if (!handle2)
  {
   byte temp;
@@ -516,7 +518,34 @@ int do_it2 (char *source, char *target)
  for (l2=0; l2<l1; l2++)
  {
   c1=dos_getc(handle1);
+  if (c1<0)
+  {
+   byte temp;
+  
+   temp=dos_errno;
+   dos_puts(source);
+   dos_puts(e_dash);
+   dos_errno=temp;
+   wrerr();
+   dos_close(handle1);
+   dos_close(handle2);
+   return -1;
+  }
+  
   c2=dos_getc(handle2);
+  if (c2<0)
+  {
+   byte temp;
+  
+   temp=dos_errno;
+   dos_puts(target);
+   dos_puts(e_dash);
+   dos_errno=temp;
+   wrerr();
+   dos_close(handle1);
+   dos_close(handle2);
+   return -1;
+  }
   
   if (c1==0x1A) e=1;
   
@@ -532,8 +561,9 @@ int do_it2 (char *source, char *target)
    wrhex1(c2);
    dos_puts(e_crlf);
    tally++;
-   if (tally==10)
+   if (tally>=10)
    {
+    e=1;
     dos_puts(e_ten);
     break;
    }
@@ -567,7 +597,7 @@ int do_it1 (char *source, char *tgtmask)
  if (dos_getattr(tgtmask) & ATTR_DIRECTORY)
  {
   strcpy(fnbuf4, tgtmask);
-  strcat(fnbuf4, "\\");
+  if (fnbuf4[strlen(fnbuf4)-1]!='\\') strcat(fnbuf4, "\\");
   strcat(fnbuf4, basename(source));
   return do_it2(source, fnbuf4);
  }
