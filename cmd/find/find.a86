@@ -1,0 +1,448 @@
+; Copyright 2022 S. V. Nickolas.
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy 
+; of this software and associated documentation files (the "Software"), to 
+; deal with the Software without restriction, including without limitation the 
+; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
+; sell copies of the Software, and to permit persons to whom the Software is 
+; furnished to do so, subject to the following conditions:
+;
+;   1. Redistributions of source code must retain the above copyright notice, 
+;      this list of conditions and the following disclaimers.
+;   2. Redistributions in binary form must reproduce the above copyright 
+;      notice, this list of conditions and the following disclaimers in the 
+;      documentation and/or other materials provided with the distribution.
+;   3. The name of the author may not be used to endorse or promote products 
+;      derived from this Software without specific prior written permission.
+;
+; THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
+; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+;
+; IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+; SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+; PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+; To note:
+;   Exit should be as follows:
+;     0 - Search was successful.
+;     1 - Search was unsuccessful.
+;     2 - Something else happened.
+
+bufsiz    equ       4096
+linbufsiz equ       1024
+
+mode_v    equ       0x01                ; /V: invert search result
+mode_c    equ       0x02                ; /C: show count, not actual lines
+mode_n    equ       0x04                ; /N: prefix lines with line number
+mode_i    equ       0x08                ; /I: smash case when searching
+
+          cpu       8086
+          org       0x0100
+entry:    mov       ah, 0x30            ; Version check (MS-DOS 2.0)
+          int       0x21
+          cmp       al, 0x02
+          jb        .1
+          jmp       okdos               ; Pass
+.1:       mov       dx, edos1           ; "Incorrect DOS version"
+          call      wrstr
+          int       0x20                ; DOS 1 EXIT
+succeed:  inc       word [matches]      ; Handle flags/output if search
+          mov       ah, [mode]          ; succeeded.
+          test      ah, mode_c          ; If count only was requested, output
+          jnz       wsret               ; nothing.
+          and       ah, mode_n          ; If line numbers were requested,
+          jz        .1                  ; prefix the line number to our output
+          mov       dl, '['             ; (in the same format as PC DOS 6.3).
+          mov       ah, 0x02            ; PUTCHAR
+          int       0x21
+          mov       ax, [linno]         ; Decimal output
+          call      wrnum
+          mov       dl, ']'
+          mov       ah, 0x02            ; PUTCHAR
+          int       0x21
+.1:       mov       dx, linbuf          ; Now write line, followed by CRLF.
+          call      wrstrc
+          mov       dx, ecrlf1          ; FALL INTO
+wrstr:    mov       ah, 0x09
+          int       0x21
+wsret:    ret
+wrnum:    mov       byte [bssend-1], 0  ; Recycle the end of linbuf2.
+          mov       di, bssend-2        ; (Only does an unsigned word.
+.1:       xor       dx, dx              ;  Output will be a C string.)
+          mov       bx, 10              ; DECIMAL
+          div       bx                  ; AX=(DX:AX)/BX; DX=(DX:AX)%BX
+          add       dl, '0'             ; Convert remainder to ASCII
+          mov       [di], dl            ; Write it into buffer
+          dec       di                  ; Step down
+          or        ax, ax              ; Anything left?
+          jnz       .1                  ; Yes, so keep going.
+          mov       dx, di
+          inc       dx                  ; FALL INTO
+wrstrc:   push      di
+          mov       di, dx
+.1:       mov       ah, 0x02            ; PUTCHAR
+          mov       dl, [di]
+          or        dl, dl              ; Null terminator?
+          jz        .2                  ; Yes, restore di and exit
+          int       0x21
+          inc       di
+          jmp short .1
+.2:       pop       di
+          ret
+killspc:  cmp       byte [di], ' '      ; Keep pushing DI as long as it points
+          je        .1                  ; to whitespace (space or tab), and is
+          cmp       byte [di], 0x09     ; not out of the command line area.
+          jne       .2
+.1:       inc       di
+          cmp       di, 0x0100          ; End of buffer
+          jb        killspc
+.2:       ret
+smash:    cmp       ah, 'a'             ; Smash lowercase to uppercase.
+          jb        .1
+          cmp       ah, 'z'
+          ja        .1
+          and       ah, 0x5F
+.1:       ret
+noarg:    mov       di, enoarg          ; "Required parameter missing"
+          jmp short scream
+xsarg:    mov       di, exsarg          ; "Too many parameters"
+scream:   push      cs                  ; Restore DS to code segment.
+          pop       ds
+          xor       cx, cx              ; Length counter
+          push      di                  ; Save pointer
+.1:       mov       ah, [di]            ; Count length
+          or        ah, ah
+          je        .2
+          inc       di
+          inc       cx
+          jmp short .1
+.2:       pop       dx                  ; Restore pointer, but to DX
+          mov       bx, 0x0002          ; stderr
+          mov       ah, 0x40            ; WRITE
+          int       0x21
+die:      mov       ax, 0x4C02
+          int       0x21                ; EXIT code 2
+okdos:    mov       di, bss             ; Flush BSS memory
+          mov       cx, bsslen
+          xor       al, al
+          rep stosb
+          mov       di, 0x0081          ; Command line pointer
+nextarg:  call      killspc             ; (I know I'm swapping DI/SI, sosumi.)
+          cmp       byte [di], 0x0D
+          je        noarg
+.1:       mov       ah, [di]
+          cmp       ah, 0x0D            ; End of line
+          jne       .2
+          jmp       testargs
+.2:       cmp       ah, '/'             ; Switch flag, can be anywhere except
+          je        switch              ; inside the search argument
+          cmp       ah, '"'             ; Search argument
+          je        quote
+          call      smash               ; Smash case
+          mov       al, [string]
+          or        al, al              ; There isn't a search argument,
+          je        noarg               ; so die screaming.
+          mov       al, [fname]
+          or        al, al              ; We've already got a filename,
+          jne       xsarg               ; so die screaming.
+          mov       si, fname           ; Copy the filename.
+.3:       mov       [si], ah
+          inc       di
+          inc       si
+          mov       ah, [di]            ; NEEEXT!
+          cmp       ah, 0x0D            ; End of line.
+          jne       .4
+          jmp       testargs
+.4:       call      smash
+          cmp       ah, ' '             ; In case there's switches afterward.
+          je        nextarg
+          cmp       ah, 0x09
+          je        nextarg
+          cmp       ah, '/'             ; Switch to switch mode.
+          jne       .3                  ; FALL THROUGH
+switch:   inc       di
+          mov       ah, [di]
+          call      smash
+          inc       di
+          cmp       ah, 'V'             ; Print no match instead of match
+          je        .1
+          cmp       ah, 'C'             ; Only print count
+          je        .2
+          cmp       ah, 'N'             ; Print [line number] before line
+          je        .3
+          cmp       ah, 'I'             ; Smash case before searching
+          je        .4
+%ifdef HELP
+          cmp       ah, '?'
+          je        dohelp
+%endif
+          mov       [xswitch], ah       ; Patch error message, die screaming
+          mov       di, eswitch
+          jmp short toscream
+.1:       or        byte [mode], mode_v
+          jmp short tonxt
+.2:       or        byte [mode], mode_c
+          jmp short tonxt
+.3:       or        byte [mode], mode_n
+          jmp short tonxt
+.4:       or        byte [mode], mode_i
+tonxt:    jmp       nextarg
+
+%ifdef HELP
+dohelp:   mov       dx, ehelp
+          call      wrstr
+          jmp       die
+%endif
+
+quote:    mov       ah, [string]        ; Only one string permitted
+          or        ah, ah
+          jne       xsarg
+          inc       di
+          mov       ah, [di]            ; Prepare copy
+          cmp       ah, '"'             ; A null string ("") is syntax error
+          je        syn
+          mov       si, string
+.1:       mov       [si], ah
+          inc       di
+          inc       si
+          cmp       di, 0x0100          ; End of line, no quote, die screaming
+          je        syn
+          mov       ah, [di]
+          cmp       ah, 0x0D            ; End of line, no quote, die screaming
+          je        syn
+          cmp       ah, '"'
+          jne       .1                  ; Not quote, keep searching.
+          cmp       byte [di+1], '"'    ; Two in a row - parse as single quote
+          jne       .2                  ; (so MS-DOS 6.22 online help)
+          inc       di
+          jmp short .1
+.2:       xor       ah, ah              ; Drop a null terminator at the end
+          mov       [si], ah
+          inc       di                  ; Skip the quote, go back to scanning
+          jmp       nextarg
+syn:      mov       di, esyn            ; Syntax error
+toscream: jmp       scream
+
+testargs: mov       ah, [fname]         ; Use an external file or stdin?
+          or        ah, ah
+          je        ready               ; Use stdin
+          mov       ax, 0x3D00          ; Open external file
+          mov       dx, fname
+          int       0x21
+          jnc       .4                  ; Success
+          cmp       al, 0x02            ; Find error, die screaming
+          je        .1
+          cmp       al, 0x03
+          je        .2
+          cmp       al, 0x05
+          je        .3
+          mov       di, ewut
+          jmp short toscream
+.1:       mov       di, efile
+          jmp short toscream
+.2:       mov       di, epath
+          jmp short toscream
+.3:       mov       di, eaccess
+          jmp short toscream
+.4:       mov       [handle], ax        ; Save handle (defaults to stdin)
+          mov       dx, eheader         ; Write header
+          call      wrstr
+          mov       dx, fname
+          call      wrstrc
+          mov       ah, [mode]          ; Colon for /C; newline otherwise
+          and       ah, mode_c
+          jz        .5
+          mov       dx, ecolon
+          jmp short .6
+.5:       mov       dx, ecrlf1
+.6:       call      wrstr
+ready:    mov       ah, [mode]          ; If case insensitive search was
+          and       ah, mode_i          ; requested, then smash the case of
+          jz        .2                  ; the search string.
+          mov       di, string
+.1:       mov       ah, [di]
+          or        ah, ah              ; End of line
+          jz        .2
+          call      smash
+          mov       [di], ah
+          inc       di
+          cmp       di, fname           ; End of buffer
+          jb        .1
+.2:       mov       di, linbuf
+.3:       mov       ah, 0x3F            ; Get a block from the file.
+          mov       bx, [handle]
+          mov       cx, bufsiz          ; As much room as we have
+          mov       dx, buffer
+          int       0x21
+          jnc       .4
+          mov       di, eread           ; "Read error"
+          jmp       scream
+.4:       mov       bp, si              ; Set BP to the end of what we read.
+          add       bp, ax              ; (Usually end of buffer)
+          mov       si, buffer          ; Read pointer is now start of buffer
+          or        ax, ax              ; EOF?
+          je        .9                  ; Check what we got, then die.
+.5:       inc       word [linno]
+          mov       di, linbuf
+.6:       mov       ah, [si]
+          cmp       ah, 0x1A            ; EOF?
+          je        .9                  ; Check what we got, then die
+          cmp       ah, 0x0D            ; CR?
+          jne       .7
+          cmp       byte [si+1], 0x0A   ; LF?
+          jne       .7
+          inc       si                  ; Skip the CRLF
+          inc       si
+          mov       byte [di], 0x00     ; Null terminator
+          jmp short .8                  ; Check line, keep going
+.7:       mov       [di], ah
+          inc       si
+          inc       di
+          cmp       di, buffer          ; If we hit 1024 bytes, force EOL.
+          je        .7
+          cmp       si, bp              ; End of buffer?
+          jne       .6                  ; No, keep reading
+          jmp short .3                  ; Read more
+.8:       call      search
+          mov       di, linbuf          ; Reset target pointer
+          jmp short .5                  ; Go back, Jack, and do it again
+.9:       call      search
+          mov       ah, [mode]          ; Did user request a count?
+          and       ah, mode_c
+          jz        .10                 ; Nope, skip
+          mov       ax, [matches]       ; Output count then newline.
+          call      wrnum
+          mov       dx, ecrlf1
+          call      wrstr
+.10:      mov       bx, [handle]        ; input handle stdin?
+          or        bx, bx
+          je        .11
+          mov       ah, 0x3E            ; no, close it
+          int       0x21
+.11:      mov       ax, [matches]       ; success?
+          or        ax, ax
+          je        .12                 ; failure; return 1
+          mov       ax, 0x4C00          ; success; return 0
+          int       0x21                ; EXIT
+.12:      mov       ax, 0x4C01
+          int       0x21                ; EXIT
+
+search:   push      si                  ; Save the pointers for later.
+          push      di
+          mov       ah, [mode]          ; If case insensitive search was
+          and       ah, mode_i          ; requested, create a case-smashed
+          jz        .3                  ; copy of the line to search on.
+          mov       si, linbuf
+          mov       di, linbuf2
+.1:       mov       ah, [si]
+          or        ah, ah              ; End of line
+          jz        .2
+          call      smash
+          mov       [di], ah            ; Copy it
+          inc       si
+          inc       di
+          cmp       di, bssend          ; End of buffer?
+          jb        .1                  ; No, so keep going
+.2:       mov       si, linbuf2
+          jmp short .4
+.3:       mov       si, linbuf          ; Otherwise just point to the line.
+.4:       mov       di, string
+          mov       bx, si              ; If we have to go back...
+          mov       al, [di]
+          cmp       byte [si], 0x00     ; Empty line?
+          jz        .12                 ; Ignore it, it's not a match.
+.5:       mov       ah, [si]
+          or        ah, ah
+          jz        .9                  ; End of line - nothing found
+          cmp       ah, al
+          je        .6                  ; Found first char
+          inc       si                  ; Move up the line
+          jmp short .5
+.6:       inc       bx
+.7:       inc       si                  ; Switch to looking for the rest
+          inc       di
+          mov       ah, [si]
+          mov       al, [di]
+          or        al, al              ; Reached end of source string = match
+          jz        .8
+          cmp       ah, al
+          je        .7                  ; So far, so good
+          mov       di, string          ; Reset pointer
+          mov       si, bx
+          jmp short .5
+.8:       mov       ah, 0xFF            ; Set all bits on
+          jmp short .10
+.9:       xor       ah, ah              ; Set all bits off
+.10:      test      byte [mode], mode_v ; Flip result if /V requested
+          jz        .11
+          xor       ah, 0xFF
+.11:      or        ah, ah
+          jz        .12
+          call      succeed
+.12:      pop       di                  ; Pick up our pointers.
+          pop       si
+          ret
+
+; edos1 is meant to FALL THROUGH into ecrlf1.
+
+edos1:    db        "Incorrect DOS version"
+ecrlf1:   db        13, 10, "$"
+eheader:  db        "---------- $"
+ecolon:   db        ": $"
+
+%ifdef HELP
+ehelp:    db        "Searches for a text string in a file or files.", 13, 10
+          db         13, 10
+          db        'FIND [/V] [/C] [/N] [/I] "string"'
+          db         " [[drive:][path]filename[ ...]]", 13, 10, 13, 10
+          db        "  /V        Displays all lines NOT containing the"
+          db                   " specified string.", 13, 10
+          db        "  /C        Displays only the count of lines containing"
+          db                   " the string.", 13, 10
+          db        "  /N        Displays line numbers with the displayed"
+          db                   " lines.", 13, 10
+          db        "  /I        Ignores the case of characters when"
+          db                   " searching for the string.", 13, 10
+          db        '  "string"  Specifies the text string to find.', 13, 10
+          db        "  [drive:][path]filename", 13, 10
+          db        "            Specifies a file or files to search.", 13, 10
+          db         13, 10
+          db        "If a pathname is not specified, FIND searches the text"
+          db         " typed at the prompt", 13, 10
+          db        "or piped from another command.", 13, 10, "$"
+%endif
+
+; Errors to be spat to stderr should be C-strings rather than CP/M strings.
+
+enoarg:   db        "Required parameter missing", 13, 10, 0
+exsarg:   db        "Too many parameters", 13, 10, 0
+esyn:     db        "Syntax error", 13, 10, 0
+efile:    db        "File not found", 13, 10, 0
+epath:    db        "Invalid path", 13, 10, 0
+eaccess:  db        "Access denied", 13, 10, 0
+eread:    db        "Read error", 13, 10, 0
+ewut:     db        "Unknown error", 13, 10, 0
+eswitch:  db        "Invalid switch - /"
+xswitch:  db        0
+ecrlf2:   db        13, 10, 0
+
+bss:                                    ; This section of memory will be
+                                        ; entirely zeroed upon startup.
+matches   equ       $
+linno     equ       matches+2
+
+mode      equ       linno+2
+handle    equ       mode+1              ; this serves as both a zero default
+                                        ; and the handle to stdin
+string    equ       handle+2
+fname     equ       string+128
+linbuf    equ       fname+128
+buffer    equ       linbuf+linbufsiz
+linbuf2   equ       buffer+bufsiz
+bssend    equ       linbuf2+linbufsiz
+bsslen    equ       bssend-bss

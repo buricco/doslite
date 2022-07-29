@@ -1,0 +1,51 @@
+# Copyright (C) 1983 Microsoft Corp.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the Software), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT,TORT OR OTHERWISE, ARISING FROM
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+#
+# MS-DOS is a Registered Trademark of Microsoft Corp.
+
+debug.com:	debug.o debasm.o debuasm.o debcom1.o debcom2.o debconst.o debdata.o debmes.o debug.wln
+	wlink @debug.wln
+
+debug.o:	debug.asm dossym.inc debequ.inc
+	wasm -DHELP debug
+
+debasm.o:	debasm.asm dossym.inc debequ.inc
+	wasm -DHELP debasm
+
+debuasm.o:	debuasm.asm dossym.inc debequ.inc
+	wasm -DHELP debuasm
+
+debcom1.o:	debcom1.asm dossym.inc debequ.inc
+	wasm -DHELP debcom1
+
+debcom2.o:	debcom2.asm dossym.inc debequ.inc
+	wasm -DHELP debcom2
+
+debconst.o:	debconst.asm dossym.inc debequ.inc
+	wasm -DHELP debconst
+
+debdata.o:	debdata.asm dossym.inc debequ.inc
+	wasm -DHELP debdata
+
+debmes.o:	debmes.asm dossym.inc
+	wasm -DHELP debmes
+
+clean:
+	rm -f debug.com debug.o debasm.o debuasm.o debcom1.o debcom2.o debconst.o debdata.o debmes.o debug.err debasm.err debuasm.err debcom1.err debcom2.err debconst.err debdata.err debmes.err

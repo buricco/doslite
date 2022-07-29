@@ -1,0 +1,345 @@
+; Copyright 2021, 2022 S. V. Nickolas.
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy 
+; of this software and associated documentation files (the "Software"), to 
+; deal with the Software without restriction, including without limitation the 
+; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
+; sell copies of the Software, and to permit persons to whom the Software is 
+; furnished to do so, subject to the following conditions:
+;
+;   1. Redistributions of source code must retain the above copyright notice, 
+;      this list of conditions and the following disclaimers.
+;   2. Redistributions in binary form must reproduce the above copyright 
+;      notice, this list of conditions and the following disclaimers in the 
+;      documentation and/or other materials provided with the distribution.
+;   3. The name of the author may not be used to endorse or promote products 
+;      derived from this Software without specific prior written permission.
+;
+; THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
+; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+;
+; IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+; SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+; PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+; To assemble:  nasm -f bin -o choice.com choice.a86
+
+          org       0x0100
+
+;         This program requires DOS 2.0 or later because it uses ERRORLEVEL.
+;         If some weirdo decides to try running us on MS-DOS 1.25 to see what
+;         would happen, just say "Incorrect DOS version" and exit via INT20
+;         (because MS-DOS 1 does not support AH=4C).
+
+          cpu       8086
+
+entry:    mov       ah, 0x30            ; DOS 2 or later?
+          int       0x21
+          cmp       al, 0x02            ; major DOS version (0 on 1.x)
+          jae       okdos
+          mov       dx, edos1           ; no, print error and die screaming
+          mov       ah, 0x09
+          int       0x21
+          int       0x20                ; DOS 1 EXIT
+
+;         Case smash AH.  Should be pretty obvious how this works.
+
+toupper:  cmp       ah, 'a'
+          jb        tou_ret             ; can't touch this
+          cmp       ah, 'z'
+          ja        tou_ret             ; can't touch this
+                                        ; stop, hammertime
+          and       ah, 0x5F            ; mask off the lowercase bit
+tou_ret:  ret
+
+;         Process command line
+
+todone:   jmp       done                ; optimization
+okdos:    push      cs                  ; make data segment == code segment
+          pop       ds
+          mov       si, 0x0081          ; start of command line
+top:      cmp       si, 0x0100          ; overrun
+          jae       todone
+          mov       ah, [si]            ; get next character
+          cmp       ah, 0x0D            ; CR - end of line
+          jz        todone
+          cmp       ah, ' '             ; kill whitespace
+          jnz       notspc
+          inc       si                  ; skip and continue
+          jmp short top
+notspc:   cmp       ah, 0x09            ; a tab is fine too, as is a cat
+          jnz       nottab
+          inc       si                  ; skip and continue
+          jmp short top
+%ifdef HELP
+gotohelp: jmp       help
+%endif
+nottab:   cmp       ah, '/'             ; switch?
+          jnz       todone              ; no, stop processing
+opttop:   inc       si                  ; next character
+          mov       ah, [si]
+          call      toupper             ; smash case
+%ifdef HELP
+          cmp       ah, '?'             ; /?
+          jz        gotohelp
+%endif
+          cmp       ah, 'C'             ; /C: select keys to allow
+          jnz       notc
+          inc       si                  ; next character
+          cld                           ; zot option list
+          mov       di, opt             ; (write 128 zeroes)
+          xor       al, al              ; note: the empty switch case will be
+          mov       cx, 0x0080          ;       caught later and crushed
+          cs rep stosb                  ; not sure forcing ES=CS would be any
+                                        ; more efficient than an override...
+          mov       di, opt             ; reset pointer
+          mov       ah, [si]            ; if followed immediately by :, skip :
+          cmp       ah, ':'
+          jnz       ctop
+          inc       si                  ; next character
+ctop:     mov       ah, [si]            ; copy options to list
+          cmp       ah, 0x0D            ; CR - end of line
+          jz        top
+          cmp       ah, '/'             ; new switch - end of argument
+          jz        top
+          cmp       ah, ' '             ; space - end of argument
+          jz        top
+          cmp       ah, 0x09            ; tab - end of argument
+          jz        top
+          mov       [di], ah            ; add it
+          inc       si                  ; advance pointers
+          inc       di
+          jmp short ctop                ; keep going
+notc:     cmp       ah, 'N'             ; /N - don't display list of choices
+          jnz       notn
+          mov       byte [quiet], 1     ; set the flag
+          inc       si
+totop:    jmp short top                 ; label is for a size optimization
+notn:     cmp       ah, 'T'             ; /T - set default option and timeout
+          jnz       nott
+          inc       si                  ; next character
+          mov       ah, [si]
+          cmp       ah, ':'             ; if followed immediately by :, skip :
+          jnz       notcolon
+          inc       si                  ; next character
+          mov       ah, [si]
+notcolon: cmp       ah, 0x0D            ; end of line - arguments incomplete
+          jz        synerr
+          cmp       ah, ' '             ; end of arg - arguments incomplete
+          jz        synerr
+          cmp       ah, 0x09            ; end of arg - arguments incomplete
+          jz        synerr
+          mov       [timeout], ah       ; save default
+          inc       si
+          mov       ah, [si]            ; next char ,? if not, error
+          cmp       ah, ','
+          jnz       synerr
+          inc       si                  ; next character
+          mov       ah, [si]            ; digit? if not, error
+          cmp       ah, '0'
+          jb        synerr
+          cmp       ah, '9'
+          ja        synerr
+          and       ah, 0x0F            ; mask it off
+          mov       al, ah              ; hold it
+          inc       si                  ; next character
+          mov       ah, [si]            ; digit? if not, skip
+          cmp       ah, '0'
+          jb        onedigit
+          cmp       ah, '9'
+          ja        onedigit
+          and       ah, 0x0F            ; mask it off
+          mov       bl, al              ; the cheap LUT method of *10
+          xor       bh, bh
+          mov       al, [ten+bx]
+          add       al, ah              ; combine digits (limit of 99 is
+          inc       si                  ; documented by Microsoft)
+onedigit: mov       [seconds], al       ; save our timeout and loop back
+          jmp short totop               ; (pointer is already on next char)
+nott:     cmp       ah, 'S'             ; /S: case-sensitive
+          jnz       badswtch            ; no: invalid switch
+          mov       byte [nosmash], 1   ; set the flag
+          inc       si                  ; next character
+          jmp short totop               ; and loop back to continue
+badswtch: mov       [fault], ah         ; alter the message to include the
+          mov       dx, enoswitch       ; letter of the invalid switch
+          jmp short scream
+synerr:   mov       dx, esyn
+scream:   mov       ah, 0x09            ; die screaming (with error)
+          int       0x21
+          mov       ax, 0x4CFF
+          int       0x21                ; EXIT (code=255)
+
+;         Done with argument processing.  Rest of command line is prompt.
+;         Now smash the case of options (if needed) and make sure that if a
+;         default option was set with /T that it is valid.
+
+done:     mov       ah, [opt]           ; make sure we have any options set
+          or        ah, ah              ; (someone didn't use /C by itself)
+          jz        synerr
+          mov       ah, [nosmash]       ; skip the rest of the block if /S was
+          or        ah, ah              ; specified              
+          jnz       smashed
+          mov       di, opt             ; upcase the entire option list
+optloop:  mov       ah, [di]            ; get next potential option
+          or        ah, ah              ; zero = end
+          jz        smashed
+          call      toupper             ; upcase option, then keep going
+          mov       [di], ah
+          inc       di
+          cmp       di, optend          ; end of our memory block?
+          jb        optloop             ; no, keep going
+smashed:  mov       ah, [timeout]       ; skip the rest of the block unless /T
+          or        ah, ah              ; was specified
+          jz        toutok
+          mov       ah, [nosmash]       ; if we're smashing case, smash the
+          or        ah, ah              ; case of the default option too.
+          jnz       smashed2
+          mov       ah, [timeout]       ; smash case and then put it back.
+          call      toupper
+          mov       [timeout], ah
+smashed2: mov       di, opt             ; set initial pointer
+toutloop: mov       ah, [di]            ; get next option
+          or        ah, ah              ; is it zero (end of list)?
+          jz        nerpski             ; yes, error out
+          cmp       ah, [timeout]       ; is it our char?
+          jz        toutok              ; yes, so move on
+          inc       di                  ; next, please
+          cmp       di, optend          ; end of list?
+          jb        toutloop            ; no, keep going
+nerpski:  mov       dx, edefault        ; OK, it's broken, so die screaming
+          jmp short scream
+
+;         Display prompt.
+
+toutok:   cmp       si, 0x0100          ; end of memory?
+          jae       pmptdone            ; yes, quit reading
+          mov       ah, [si]            ; get our character
+          cmp       ah, 0x0D            ; EOL?
+          jz        pmptdone            ; yes, quit reading
+          mov       dl, ah              ; tell DOS to write it
+          mov       ah, 0x02
+          int       0x21
+          inc       si                  ; NEXT!
+          jmp short toutok
+pmptdone: mov       ah, [quiet]         ; skip the rest of the block if /N was
+          or        ah, ah              ; specified
+          jnz       shutup
+          mov       si, opt
+          mov       dl, '['             ; open prompt
+          jmp short sepchar             ; "[" the first time, "," thereafter...
+pmptloop: mov       dl, ','
+sepchar:  mov       ah, 0x02
+          int       0x21
+pmptstrt: mov       dl, [si]            ; get character (DOS wants it in DL)
+          or        dl, dl              ; zero (end of list)?
+          jz        pmptq               ; done
+          mov       ah, 0x02            ; print it by DOS
+          int       0x21
+          inc       si                  ; next character
+          mov       ah, [si]
+          or        ah, ah              ; zero (end of list)?
+          jz        pmptq               ; yes, so end parsing
+          cmp       si, optend
+          jb        pmptloop
+pmptq:    mov       dx, closetag        ; "]?" to close prompt
+          mov       ah, 0x09
+          int       0x21
+shutup:   mov       ah, [timeout]       ; if not using a timeout, use a simple
+          or        ah, ah              ; keyboard read function.
+          jz        rdsimple
+          mov       ah, 0x2C            ; get the initial system time
+          int       0x21                ; (only seconds needed).
+          mov       [tank], dh
+tick:     mov       ah, 0x0B            ; poll the keyboard via DOS
+          int       0x21
+          or        al, al              ; is a key waiting?
+          jnz       rdsimple            ; stop waiting and do normal read.
+          mov       ah, 0x2C            ; no, get the new time
+          int       0x21
+          cmp       dh, [tank]          ; tick?
+          jz        tick                ; not yet, loop
+          mov       [tank], dh          ; update
+          mov       ah, [seconds]       ; count down
+          dec       ah
+          mov       [seconds], ah       ; update
+          or        ah, ah
+          jnz       tick                ; not done yet
+          mov       ah, [timeout]       ; time's up, get default
+          jmp short ckkey
+rdsimple: mov       ah, 0x08            ; request blocking input from stdin
+          int       0x21
+          mov       ah, al              ; move key to our work register
+          mov       al, [nosmash]       ; are we smashing case?
+          or        al, al
+          jnz       ckkey               ; no, skip
+          call      toupper             ; do it, maggot
+ckkey:    mov       si, opt             ; is the pressed key valid?
+          mov       al, 1               ; this will be our ERRORLEVEL
+ckkl:     cmp       ah, [si]            ; check against next key in list
+          jz        gotit               ; we gotcha!
+          inc       al                  ; increment ERRORLEVEL
+          inc       si                  ; increment offset
+          mov       bl, [si]            ; zero?
+          or        bl, bl
+          jz        ckfail              ; yes, so stop looking
+          cmp       si, optend          ; end of the line
+          jb        ckkl                ; nope, keep looking (otherwise error)
+ckfail:   mov       ah, 0x02
+          mov       dl, 0x07            ; beep
+          int       0x21
+          jmp short rdsimple            ; even if we have a timeout, a key was
+                                        ; pressed, so ignore the timeout.
+gotit:    mov       [tank], al          ; hold this
+          mov       dl, ah              ; echo the key
+          mov       ah, 0x02
+          int       0x21
+          mov       dx, crlf            ; write newline
+          mov       ah, 0x09
+          int       0x21
+          mov       al, [tank]          ; get our ERRORLEVEL back
+          mov       ah, 0x4C            ; and send it back to DOS as we
+          int       0x21                ; EXIT
+
+%ifdef HELP
+help:     mov       dx, ehelp
+          mov       ah, 0x09
+          int       0x21
+          mov       ax, 0x4C00
+          int       0x21
+%endif
+
+ten       db        0, 10, 20, 30, 40, 50, 60, 70, 80, 90
+
+tank      db        0x00
+
+quiet     db        0x00
+nosmash   db        0x00
+timeout   db        0x00
+seconds   db        0x00
+
+edos1     db        "Incorrect DOS version", 0x0D, 0x0A, "$"
+esyn      db        "Syntax error", 0x0D, 0x0A, "$"
+enoswitch db        "Invalid switch - /"
+fault     db        0x00
+crlf      db        0x0D, 0x0A, "$"
+edefault  db        "Default option not valid", 0x0D, 0x0A, "$"
+closetag  db        "]?$"
+%ifdef HELP
+ehelp     db        "Waits for the user to choose one of a set of choices.", 0x0D, 0x0A, 0x0D, 0x0A
+          db        "CHOICE [/C[:]choices] [/N] [/S] [/T[:]c,nn] [text]", 0x0D, 0x0A, 0x0D, 0x0A
+          db        "  /C[:]choices  Specifies allowable keys.  Default is YN.", 0x0D, 0x0A
+          db        "  /N            Do not display choices and ? at end of prompt string.", 0x0D, 0x0A
+          db        "  /S            Treat choice keys as case-sensitive.", 0x0D, 0x0A
+          db        "  /T[:]c,nn     Default choice to c after nn seconds.", 0x0D, 0x0A
+          db        "  text          Prompt string to display.", 0x0D, 0x0A, 0x0D, 0x0A
+          db        "ERRORLEVEL is set to the offset of the key pressed in choices.", 0x0D, 0x0A, "$"
+%endif
+opt       db        "YN", 0
+
+optend    equ       opt+0x80

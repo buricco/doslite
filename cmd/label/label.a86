@@ -1,0 +1,518 @@
+; Copyright 2022 S. V. Nickolas.
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy 
+; of this software and associated documentation files (the "Software"), to 
+; deal with the Software without restriction, including without limitation the 
+; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
+; sell copies of the Software, and to permit persons to whom the Software is 
+; furnished to do so, subject to the following conditions:
+;
+;   1. Redistributions of source code must retain the above copyright notice, 
+;      this list of conditions and the following disclaimers.
+;   2. Redistributions in binary form must reproduce the above copyright 
+;      notice, this list of conditions and the following disclaimers in the 
+;      documentation and/or other materials provided with the distribution.
+;   3. The name of the author may not be used to endorse or promote products 
+;      derived from this Software without specific prior written permission.
+;
+; THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
+; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+;
+; IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+; SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+; PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+          cpu       8086
+          org       0x0100
+
+entry:    mov       ah, 0x30            ; Get DOS version
+          int       0x21
+          xchg      ah, al
+          cmp       ax, 0x0300          ; DOS 2 is broken, see notes below.
+          jae       dosok
+          mov       dx, edos12
+          call      wrstr
+          int       0x20                ; DOS 1 EXIT
+dosok:    mov       [dosver], ax
+
+          mov       di, 0x0081          ; Beginning of command tail
+          call      killspc             ; Skip whitespace
+          mov       ax, [di]            ; Next char in AL, char after in AH
+          cmp       al, 0x0D            ; CR - end of line
+          je        .1
+%ifdef HELP
+          cmp       ax, '?/'            ; "/?"; word is reversed
+          je        help
+%endif
+          cmp       ah, ':'             ; drive letter?
+          jne       .1
+          and       al, 0x1F            ; quick and dirty way to 0-base it
+          dec       al
+          mov       [drive], al         ; store it
+          inc       di
+          inc       di
+          call      killspc             ; optional space after drive
+          jmp short .2
+.1:       mov       ah, 0x19            ; use the current drive
+          int       0x21
+          mov       [drive], al
+.2:       push      di
+          mov       cx, 12              ; decimal
+          mov       al, 0x00            ; zot out the filename buffer
+          mov       di, filename
+          cld
+          rep stosb
+          pop       di
+          mov       si, filename        ; copy the filename to the buffer
+.3:       mov       ah, [di]
+          cmp       ah, 0x0D            ; CR - end of line
+          je        .5
+          mov       [si], ah
+          inc       di
+          inc       si
+          cmp       si, terminal        ; end of buffer - die screaming
+          jb        .3
+          mov       dx, elong
+.4:       call      wrstr
+          mov       ax, 0x4C01
+          int       0x21                ; EXIT CODE 1
+.5:       mov       ah, [filename]      ; so, was there a filename?
+          or        ah, ah
+          jz        .6
+          call      chklabel            ; validate it
+          jnc       .6
+          mov       dx, einvchr         ; not valid - die screaming
+          jmp short .4
+.6:       mov       ah, [drive]         ; Put current directory in a buffer.
+          call      ckdrv
+          mov       ah, 0x19            ; Save current drive
+          int       0x21
+          mov       [drvtank], al
+          mov       byte [pwdtank], '\'
+          mov       si, pwdtank+1
+          mov       dl, [drive]
+          inc       dl
+          mov       ah, 0x47            ; GETPWD
+          int       0x21
+          jnc       .7
+          mov       dx, edrive          ; Die screaming if that failed
+          jmp short .4
+.7:       mov       ax, 0x2523          ; Install break handler to restore PWD
+          mov       dx, brktrap
+          int       0x21
+          mov       ah, 0x0E            ; Set new drive
+          mov       dl, [drive]
+          int       0x21
+          mov       ah, 0x3B            ; Change to root directory
+          mov       dx, bkslash
+          int       0x21
+          mov       ah, [filename]      ; Was a filename provided?
+          or        ah, ah
+          jnz       ready               ; Yes, use it.
+          call      getvol              ; Show volume label
+          call      showvsn             ; and serial number (DOS 4.0+)
+ask:      mov       dx, eprompt         ; Prompt for new label
+          call      wrstr
+          mov       dx, reqarg          ; Set up DOS to get line from stdin
+          mov       byte [reqarg], 11   ; Decimal - line length
+          mov       byte [reqarg+1], 0  ; Disables F3 type-over
+          mov       ah, 0x0A
+          int       0x21
+          mov       dx, mcrlf           ; Print newline
+          call      wrstr
+          mov       ah, [reqarg+2]      ; Was anything typed?
+          cmp       ah, 0x0D
+          jnz       .2                  ; Yes, use it
+          mov       ah, [haslab]        ; Was there a label already?
+          or        ah, ah
+          jz        done                ; No, don't need to delete it
+          mov       dx, edelete         ; "Delete current volume label?"
+          call      wrstr
+          mov       ah, 0x01            ; GETCHE
+          int       0x21
+          push      ax                  ; Hold onto our char
+          mov       dx, mcrlf           ; Print newline
+          call      wrstr
+          pop       ax                  ; Get char back
+          cmp       al, 'Y'             ; Y = delete; anything else = die
+          je        .1
+          cmp       al, 'y'
+          jne       done
+.1:       call      zotlabel            ; Delete the label.
+          jc        done
+          call      cleanup             ; Restore original drive and directory
+          mov       ax, 0x4C03
+          int       0x21                ; EXIT CODE 3
+.2:       mov       ah, [reqarg+1]      ; Copy our filename over to the buffer.
+          xor       al, al
+          mov       di, filename
+.3:       mov       ah, [di]
+          cmp       ah, 0x0D
+          je        .4
+          inc       di
+          jmp short .3
+.4:       mov       byte [di], 0x00     ; Add NUL terminator.
+          call      chklabel            ; Validate it.
+          jnc       ready               ; Valid - now go do it
+          mov       dx, einvchr         ; Invalid - yell at the user
+          call      wrstr
+          jmp       ask                 ; Go back, Jack, and do it again
+ready:    call      zotlabel            ; Delete label (whether there or not!)
+          call      mklabel             ; Make our new label
+          jnc       done                ; It worked, I'm outtie
+          mov       dx, efile           ; It failed, die screaming
+          call      wrstr
+          call      cleanup             ; Restore original drive and directory
+          mov       ax, 0x4C04
+          int       0x21                ; EXIT CODE 4
+
+done:     call      cleanup             ; Restore original drive and directory
+          mov       ax, 0x4C00
+          int       0x21                ; EXIT CODE 0
+
+brktrap:  push      cs
+          pop       ds
+          call      cleanup             ; Restore original drive and directory
+          mov       ax, 0x4C02
+          int       0x21                ; EXIT CODE 2
+
+cleanup:  mov       dx, pwdtank
+          mov       ah, 0x3B            ; CHDIR
+          int       0x21
+          mov       ah, 0x0E            ; SETDRV
+          mov       dl, [drvtank]
+          int       0x21
+          ret
+
+%ifdef HELP
+help:     mov       dx, ehelp           ; Display command-line help
+          call      wrstr
+          mov       ax, 0x4C00
+          int       0x21
+%endif
+
+; Check whether drive requested is:
+;   * legitimate
+;   * not SUBSTed
+;   * a local drive
+; and if any of these tests fail, die screaming.
+
+ckdrv:    mov       [drvchk], ah
+          mov       ah, 0x19            ; GETDISK
+          int       0x21
+          mov       [drvtmp], al
+          mov       ah, 0x0E            ; SETDISK
+          mov       dl, [drvchk]
+          int       0x21
+          mov       ah, 0x19            ; GETDISK (because SETDISK doesn't
+          int       0x21                ; officially provide an error flag?!)
+          cmp       [drvchk], al
+          je        drvok
+nodrv:    mov       dx, edrive          ; it failed, die screaming
+scream:   call      wrstr
+          mov       ax, 0x4C01
+          int       0x21                ; EXIT (code 1)
+drvok:    mov       dl, [drvtmp]
+          mov       ah, 0x0E            ; SETDISK
+          int       0x21
+          mov       ax, 0x4409          ; ISREMOTE
+          mov       bl, [drvchk]
+          inc       bl                  ; 1-based (0=current)
+          int       0x21
+          jc        nodrv
+          mov       [mediaid], dx       ; as good a place as any to stash it
+          and       dx, 0x8000          ; SUBST/ASSIGN?
+          jne       issubst             ; Yes, so die screaming
+          mov       dx, [mediaid]       ; Check again
+          and       dx, 0x1000          ; Remote?
+          jne       isremote            ; Yes, so die screaming
+          clc                           ; Done, I'm outtie
+          ret
+issubst:  mov       dx, eassign
+          jmp short scream
+isremote: mov       dx, eremote
+          jmp short scream
+
+killspc:  cmp       byte [di], ' '      ; Keep pushing DI as long as it points
+          je        .1                  ; to whitespace (space or tab), and is
+          cmp       byte [di], 0x09     ; not out of the command line area.
+          jne       ksret
+.1:       inc       di
+          cmp       di, 0x0100
+          jb        killspc
+ksret:    ret
+
+; Display the volume label on the current drive.
+; Set carry if something went wrong.
+
+getvol:   mov       ah, 0x19            ; GETDRV
+          int       0x21
+          add       al, 'A'
+          mov       [xdrive], al        ; Modify the message accordingly
+          mov       dx, mvolume         ; "Volume in drive..."
+          call      wrstr
+          mov       dx, ffblk
+          mov       ah, 0x1A            ; SETDTA
+          int       0x21
+          mov       ax, 0x4E00          ; FINDFIRST
+          mov       cx, 0x0008          ; Label (On DOS 2 this finds normal
+                                        ; files too so you would need to check
+                                        ; that we actually got a label.  Too
+                                        ; lazy to do that, so just required 3)
+          mov       dx, volblk          ; Search for "*.*" (already in \)
+          int       0x21
+          jnc       .2                  ; NC = found something
+.1:       mov       dx, mnolabel        ; "...has no label"
+          call      wrstr
+          mov       byte [haslab], 0    ; mark it for later
+          clc
+          ret                           ; nothing to find
+.2:       mov       ax, 0x2900          ; Parse the filename into an FCB.  An
+          mov       si, fin             ; unobvious side effect of this is
+          mov       di, mainfcb         ; that it gives us close to the format
+          int       0x21                ; we need, without a "." at character 
+                                        ; 8 (but with any deliberate dots or 
+                                        ; spaces).
+          inc       al                  ; Error is 0xFF; inc makes it wrap.
+          jnz       .3
+          stc                           ; drive error
+          ret
+.3:       mov       dx, mis             ; "...is..."
+          call      wrstr
+          mov       di, stophere-1      ; Get rid of terminal spaces; replace
+.4:       mov       ah, [di]            ; them with NULs.
+          cmp       ah, ' '
+          jnz       .5
+          mov       byte [di], 0x00
+          dec       di
+          cmp       di, cfcbfn          ; Hit the top
+          jae       .4
+.5:       mov       di, cfcbfn          ; Print the label, one char at a time.
+.6:       mov       dl, [di]
+          or        dl, dl
+          jz        .7
+          mov       ah, 0x02
+          int       0x21
+          inc       di
+          cmp       di, stophere
+          jb        .6
+.7:       mov       dx, mcrlf           ; Newline.
+          call      wrstr
+          mov       byte [haslab], 1    ; Mark it off.
+          clc                           ; No error condition
+          ret
+
+showvsn:  mov       ax, [dosver]        ; DOS 4 or later?
+          cmp       ah, 0x04
+          jb        noser               ; No, so no need to check for a VSN.
+          mov       bx, 0x0000          ; Current drive
+          mov       cx, 0x0866          ; GET_MID
+          mov       dx, mediaid
+          mov       ax, 0x440D          ; IOCTL
+          int       0x21
+          mov       ax, serlo           ; Did we actually get a VSN?
+          or        ax, ax
+          jne       hasser              ; One half is nonzero - so yes
+          mov       ax, serhi
+          or        ax, ax
+          je        noser               ; The whole number is zero - assume no
+                                        ; (0000-0000 is a valid VSN, but we
+                                        ;  can ignore that)
+hasser:   mov       dx, mvolser         ; "Volume serial number is"
+          call      wrstr
+          mov       ax, [serhi]         ; Print the first half
+          call      wrwrd
+          mov       dl, '-'             ; Separator
+          mov       ah, 0x02
+          int       0x21
+          mov       ax, [serlo]         ; Print the second half.
+          call      wrwrd
+noser:    mov       dx, mcrlf           ; FALL INTO
+wrstr:    mov       ah, 0x09
+          int       0x21
+          ret
+
+wrwrd:    mov       [tank+1], al        ; Store second half, write first half,
+          call      wrbyt               ; recall second half, and fall through
+          mov       ah, [tank+1]        ; to write the second half.
+wrbyt:    mov       [tank], ah          ; Do the same for digits.
+          mov       cl, 4
+          shr       ah, cl
+          call      hexit
+          mov       ah, [tank]
+hexit:    and       ah, 0x0F            ; Convert nibble to ASCII
+          cmp       ah, 0x09
+          ja        .1
+          or        ah, 0x30            ; 0-9 to ASCII
+          jmp short .2
+.1:       add       ah, 0x37            ; make 0x0A -> 0x41 'A'
+.2:       mov       dl, ah
+          mov       ah, 0x02            ; PUTCH
+          int       0x21
+          ret
+
+; If the requested label is acceptable, return with carry clear.
+; If it has invalid characters or is too long, return with carry set.
+
+chklabel: mov       di, filename
+.1:       mov       ah, [di]
+          or        ah, ah              ; Null terminator
+          jz        .5
+          cmp       ah, 'a'             ; Smash case
+          jb        .2
+          cmp       ah, 'z'
+          ja        .2
+          and       ah, 0x5F
+          mov       [di], ah            ; Copy it back
+.2:       mov       si, invchrs         ; chars not allowed in filenames
+.3:       cmp       ah, [si]
+          je        .4                  ; Oops, found one!
+          inc       si
+          mov       al, [si]
+          or        al, al              ; End of list?
+          jnz       .3                  ; No, keep checking
+          inc       di
+          cmp       di, terminal        ; End of buffer?
+          jb        .1                  ; No, keep scanning
+.4:       stc                           ; Set error condition and leave
+          ret
+.5:       clc
+          ret
+
+; Delete the existing disk volume label.
+; Returns carry set if there was an error, carry clear if the delete was
+; either successful or unnecessary.
+;
+; ALERT!  We could support MS-DOS 2.x, but we would need to validate that the
+;         file we're getting back from FINDFIRST is, in fact, a label.
+
+zotlabel: mov       dx, ffblk
+          mov       ah, 0x1A            ; SETDTA
+          int       0x21
+          mov       ax, 0x4E00          ; FINDFIRST
+          mov       cx, 0x0008          ; label
+          mov       dx, volblk
+          int       0x21
+          jnc       .2
+.1:       clc
+          ret                           ; nothing to find
+.2:       mov       ax, 0x2900          ; convert to FCB format
+          mov       si, fin
+          mov       di, mainfcb
+          int       0x21
+          inc       al
+          jnz       .3
+          stc                           ; drive error
+          ret
+.3:       mov       ah, 0x13            ; DEL_FCB
+          mov       dx, creatfcb
+          int       0x21
+          or        al, al
+          jz        .1
+          stc
+          ret
+
+; Create a new volume label.
+; Returns carry set if there was an error, carry clear if the create was
+; successful.
+
+mklabel:  mov       al, ' '             ; flush the filename are in our FCB
+          mov       di, cfcbfn
+          mov       cx, 11              ; decimal
+          cld
+          rep stosb
+          mov       di, filename        ; copy our label into the FCB
+          mov       si, cfcbfn
+.1:       mov       ah, [di]
+          or        ah, ah              ; NUL found?
+          jz        .2                  ; yes = stop
+          mov       [si], ah            ; copy another char
+          inc       di
+          inc       si
+          cmp       si, stophere        ; overflow?
+          jb        .1                  ; no = keep going.
+.2:       mov       ah, 0x16            ; CREAT_FCB
+          mov       dx, creatfcb
+          int       0x21
+          or        al, al              ; 0x00 = success
+          jz        .3
+          stc                           ; error condition
+          ret
+.3:       mov       ah, 0x10            ; CLOSE_FCB
+          mov       dx, creatfcb
+          int       0x21
+          clc
+          ret                           ; done, I'm outtie
+
+%ifdef HELP
+ehelp:    db        "Creates, changes, or deletes the volume label of a disk."
+          db        13, 10, 13, 10
+          db        "LABEL [drive:][label]", 13, 10, "$"
+%endif
+
+edos12:   db        "Incorrect DOS version", 13, 10, "$"
+edrive:   db        "Invalid drive specification", 13, 10, "$"
+eassign:  db        "Cannot LABEL a JOINed, SUBSTed or ASSIGNed drive"
+          db        13, 10, "$"
+eremote:  db        "Cannot LABEL a network drive", 13, 10, "$"
+einvchr:  db        "Invalid characters in volume label", 13, 10, "$"
+elong:    db        "Too many characters in volume label", 13, 10, "$"
+efile:    db        "Cannot create directory entry", 13, 10, "$"
+eprompt:  db        "Volume label (11 characters, <Enter> for none): $"
+edelete:  db        "Delete current volume label (Y/N)? $"
+
+mvolume:  db        "Volume in drive "
+xdrive    db        "A $"
+mnolabel: db        "has no label"      ; FALL INTO
+mcrlf:    db        13, 10, "$"
+mvolser:  db        "Volume Serial Number "
+                                        ; FALL INTO
+mis:      db        "is $"
+
+invchrs:  db        '"&()*+,./:;<=>?[\]^|', 0
+
+bkslash:  db        "\", 0
+volblk:   db        "*.*", 0
+
+creatfcb: db        0xFF                ; XFCB
+          times 5   db 0x00
+          db        0x08                ; label
+mainfcb:  db        0x00                ; current drive
+cfcbfn:   times 11  db ' '
+stophere: dw        0x0000
+          dw        0x0000
+          dd        0x00000000
+          dw        0x0000
+          dw        0x0000
+          times 8   db 0x00
+          db        0x00
+          dd        0x00000000
+
+; All of this is BSS, don't save it in the file
+
+drive     equ       $
+dosver    equ       drive+1
+
+mediaid   equ       dosver+2
+serlo     equ       mediaid+2
+serhi     equ       serlo+2
+
+ffblk     equ       serhi+2
+atr       equ       ffblk+0x0015
+fin       equ       ffblk+0x001E
+
+reqarg    equ       ffblk+128
+filename  equ       reqarg+2
+terminal  equ       filename+11
+
+haslab    equ       terminal+1
+drvchk    equ       haslab+1
+drvtmp    equ       drvchk+1
+tank      equ       drvtmp+1
+drvtank   equ       tank+2
+pwdtank   equ       drvtank+1

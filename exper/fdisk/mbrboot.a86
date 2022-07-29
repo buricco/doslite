@@ -1,0 +1,82 @@
+          cpu       8086
+
+          org       0x0600
+
+entry:    cli
+          xor       ax, ax
+          mov       ss, ax
+          mov       sp, 0x7C00
+          mov       si, sp
+          push      ax
+          pop       es
+          push      ax
+          pop       ds
+          sti
+          cld
+          mov       di, 0x0600
+          mov       cx, 0x0200
+          rep movsw
+          jmp       0x0000:newentry
+
+newentry: mov       si, partab
+          mov       bl, 4
+.1:       cmp       byte [si], 0x80
+          je        .2
+          cmp       byte [si], 0x00
+          jne       .4
+          add       si, 16
+          dec       bl
+          jnz       .1
+          int       0x18
+
+.2:       mov       dx, [si]
+          mov       cx, [si+2]
+          mov       bp, si
+.3:       add       si, 0x0010
+          dec       bl
+          jz        .7
+          cmp       byte [si], 0x00
+          je        .3
+.4:       mov       si, einvalid
+.5:       lodsb
+          or        al, al              ; End of string
+          jz        .6                  ; Yes, FREEZE
+          push      si
+          mov       bx, 0x0007          ; Attributes
+          mov       ah, 0x0E            ; CPUTCH
+          int       0x10
+          pop       si
+          jmp short .5
+.6:       jmp short .6                  ; FOREVER
+.7:       mov       di, 5               ; Retry count
+.8:       mov       bx, 0x7C00          ; Target
+          mov       ax, 0x0201          ; Read 1 sector
+          push      di
+          int       0x13
+          pop       di
+          jnc       .9
+          xor       ax, ax              ; Reset drive
+          int       0x13
+          dec       di                  ; Tick down
+          jnz       .8                  ; Go back, Jack, and do it again
+          mov       si, eload           ; Die screaming
+          jmp short .5
+.9:       mov       si, emissing
+          mov       di, 0x7DFE          ; Signature check
+          cmp       word [di], 0xAA55
+          jne       .5                  ; Nope, die screaming
+          mov       si, bp
+          jmp       0x0000:0x7C00       ; Chain into partition bootloader
+
+einvalid: db        "Invalid partition table", 0
+eload:    db        "Error loading operating system", 0
+emissing: db        "Missing operating system", 0
+
+          db        0x01BE-($-entry) dup 0x00
+
+partab:   db        16 dup 0x00
+          db        16 dup 0x00
+          db        16 dup 0x00
+          db        16 dup 0x00
+
+          dw        0xAA55

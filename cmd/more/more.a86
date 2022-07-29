@@ -1,0 +1,205 @@
+; Copyright (C) 1983 Microsoft Corp.
+; Copyright (C) 2021, 2022 S. V. Nickolas.
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy
+; of this software and associated documentation files (the Software), to deal
+; in the Software without restriction, including without limitation the rights
+; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+; copies of the Software, and to permit persons to whom the Software is
+; furnished to do so, subject to the following conditions:
+;
+; The above copyright notice and this permission notice shall be included in
+; all copies or substantial portions of the Software.
+;
+; THE SOFTWARE IS PROVIDED AS IS, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+; FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+; FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+; IN THE SOFTWARE.
+;
+; MS-DOS is a Registered Trademark of Microsoft Corp.
+
+; (The beginning of this program was written by S. V. Nickolas.  The rest is
+; adapted from MS-DOS 2.11, and ported to the nasm and yasm assemblers.)
+
+; First, make sure we're not on a version of DOS too old for us to work, and
+; that our command line is set up correctly. (It has to be blank, otherwise /?
+; for command-line help.)  MS-DOS didn't get I/O redirection until version 2.
+
+          cpu       8086
+          org       0x0100
+entry:    push      cs
+          pop       ds
+          mov       ah, 0x30            ; are we running under at least DOS 2?
+          int       0x21
+          cmp       al, 0x02            ; die screaming if run under DOS 1.x
+          jae       okdos
+          mov       dx, edos1
+          mov       ah, 0x09            ; write string (pointer in DX)
+          int       0x21                ;   (terminated by $, a CP/M-ism)
+          int       0x20                ; DOS 1 EXIT
+okdos:    mov       di, 0x0080          ; only allowed command line is /?
+.1:       inc       di
+          cmp       di, 0x0100          ; overflow
+          je        clok
+          mov       ah, [di]            ; next character
+          cmp       ah, 0x0D            ; CR?
+          je        clok                ; yes, so command line is acceptable
+          cmp       ah, ' '             ; Space?
+          je        .1                  ; yes, so keep going
+          cmp       ah, 0x09            ; Tab?
+          je        .1                  ; yes, so keep going
+          cmp       ah, '/'             ; Slash?
+          jne       .2                  ; nope, syntax error, die screaming
+          mov       ah, [di+1]          ; "/?" ?
+%ifdef HELP
+          cmp       ah, '?'
+          je        .3                  ; yes, show help
+.2:       mov       dx, eargs           ; syntax error, die screaming
+          jmp short .4                  ; skip
+.3:       mov       dx, ehelp           ; show command line help
+%else
+.2:       mov       dx, eargs           ; syntax error, die screaming
+%endif
+.4:       mov       ah, 0x09            ; output message
+          int       0x21
+          mov       ax, 0x4C01          ; return with error code 1
+          int       0x21                ; EXIT
+
+; Now, get the screen dimensions (default is 80x24).  We can get columns on
+; all systems, but rows only on EGA+; that's not an issue, because if we're
+; not on EGA+, we know the rows anyway (it's always 25).
+
+clok:     mov       byte [maxrow], 0x19 ; default of 25
+          mov       ah, 0x12            ; do we have an EGA?
+          mov       bx, 0xFF10
+          mov       cx, 0xFFFF
+          int       0x10
+          cmp       cx, 0xFFFF          ; unchanged = MDA or CGA
+          je        noega               ;   = always 25 lines
+          mov       ax, 0x0040          ; otherwise, lines-1 is stored at
+          push      es                  ;   0040:0084
+          mov       es, ax
+          mov       ah, [es:0x0084]
+          pop       es
+          inc       ah
+          mov       [maxrow], ah
+noega:    mov       ah, 0x0F            ; this, OTOH, works on anything
+          int       0x10
+          mov       [maxcol], ah
+
+; (From this point forward is adapted from Microsoft's code.)
+
+; Start with a newline.  Then duplicate stdin so we can read the incoming file
+; but route stderr to stdin so we can get keypresses as normal.
+
+          mov       dx, crlf            ; print newline
+          mov       ah, 0x09
+          int       0x21
+          xor       bx, bx              ; dup(stdin)
+          mov       ah, 0x45
+          int       0x21
+          mov       bp, ax              ; close
+          mov       ah, 0x3E
+          int       0x21
+          mov       bx, 0x0002          ; stderr
+          mov       ah, 0x45
+          int       0x21
+
+; Read the file, 4K at a time, and pause as needed.
+; aloop is the outer loop, tloop is the inner loop.
+
+aloop:    cld                           ; read up to 4K at a time
+          mov       dx, buffer
+          mov       cx, 0x1000
+          mov       bx, bp
+          mov       ah, 0x3F
+          int       0x21
+          or        ax, ax              ; EOF?
+          jnz       setcx               ; no, keep going
+done:     mov       ax, 0x4C00          ; yes, exit with return code 0
+          int       0x21                ; EXIT
+setcx:    mov       cx, ax
+          mov       si, dx
+tloop:    lodsb
+          cmp       al, 0x1A            ; EOF (^Z)?
+          jz        done                ; yes, die
+          cmp       al, 0x0D            ; CR?
+          jnz       notcr               ; no, skip
+          mov       byte [curcol], 0x01 ; act on it
+          jmp short iscntrl
+notcr:    cmp       al, 0x0A            ; linefeed?
+          jnz       notlf               ; no, skip
+          inc       byte [currow]       ; act on it
+          jmp short iscntrl
+notlf:    cmp       al, 0x08            ; backspace?
+          jnz       notbs               ; no, skip
+          cmp       byte [curcol], 0x01 ; beginning of line?
+          jz        iscntrl             ; yes, skip
+          dec       byte [curcol]       ; act on it
+          jmp short iscntrl
+notbs:    cmp       al, 0x09            ; tab?
+          jnz       nottb               ; no, skip
+          mov       ah, [curcol]        ; tab stops of 8 chars.
+          add       ah, 0x07
+          and       ah, 0xF8
+          inc       ah
+          mov       [curcol], ah
+          jmp short iscntrl
+nottb:    cmp       al, 0x07            ; bell?
+          jz        iscntrl             ; yes, act on it
+          inc       byte [curcol]       ; add to our column position
+          mov       ah, [curcol]
+          cmp       ah, [maxcol]
+          jbe       iscntrl
+          inc       byte [currow]       ; add to our row position
+          mov       byte [curcol], 0x01 ; reset column position
+iscntrl:  mov       dl, al              ; write the character to stdout
+          mov       ah, 0x02
+          int       0x21
+          mov       ah, byte [currow]   ; end of screen?
+          cmp       ah, byte [maxrow]
+          jb        charloop            ; no, keep processing
+askmore:  mov       dx, emore           ; "-- More --" prompt
+          mov       ah, 0x09
+          int       0x21
+          mov       ah, 0x0C            ; flush input, get char
+          mov       al, 0x01
+          int       0x21
+          mov       dx, crlf            ; write newline
+          mov       ah, 0x09
+          int       0x21
+          mov       byte [curcol], 0x01 ; reset position
+          mov       byte [currow], 0x01
+charloop: dec       cx
+          jz        gobig
+          jmp       tloop
+gobig:    jmp       aloop
+
+maxrow    db        0x18
+maxcol    db        0x50
+currow    db        0x01
+curcol    db        0x01
+
+; Put our messages all in one place, with help at the end.
+
+edos1:    db        "Incorrect DOS version"       ; FALL INTO
+crlf:     db        13, 10, "$"
+eargs:    db        "Invalid number of parameters", 13, 10, "$"
+emore:    db        "-- More --$"
+%ifdef HELP
+ehelp:    db        "Displays output one screen at a time.", 13, 10, 13, 10
+          db        "MORE < [drive:][path]filename", 13, 10
+          db        "command-name | MORE", 13, 10, 13, 10
+          db        "  [drive:][path]filename  Specifies a file to display "
+          db          "one screen at a time.", 13, 10
+          db        "  command-name            Specifies a command whose "
+          db          "output will be displayed.", 13, 10, "$"
+%endif
+
+; We should leave 4K+2 bytes of extra space at the end.  But we account for 
+; NASM by not actually putting the extra space into the .COM file.
+
+buffer:

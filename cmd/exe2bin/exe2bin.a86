@@ -1,0 +1,483 @@
+; Copyright 2022 S. V. Nickolas.
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy 
+; of this software and associated documentation files (the "Software"), to 
+; deal with the Software without restriction, including without limitation the 
+; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
+; sell copies of the Software, and to permit persons to whom the Software is 
+; furnished to do so, subject to the following conditions:
+;
+;   1. Redistributions of source code must retain the above copyright notice, 
+;      this list of conditions and the following disclaimers.
+;   2. Redistributions in binary form must reproduce the above copyright 
+;      notice, this list of conditions and the following disclaimers in the 
+;      documentation and/or other materials provided with the distribution.
+;   3. The name of the author may not be used to endorse or promote products 
+;      derived from this Software without specific prior written permission.
+;
+; THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
+; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+;
+; IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+; SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+; PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+; Note from the programmer:
+;
+; I've tested this with every type of input I can think of alongside the
+; Microsoft version of this program and the output is the same.  The messages
+; might be slightly different here or there, but the behavior is 99% identical
+; (the only difference is that a null entry on the fixups prompt in Microsoft
+; exe2bin will result in a re-prompt, while in this version it will parse as
+; an entry of 0; my C version does the same).
+;
+; I think it's safe to say this is a suitable replacement for the original,
+; considering that with optimizations it is smaller than even the version from
+; PC DOS 1.1!
+
+          cpu       8086
+          org       0x0100
+
+; Make sure we're not running on MS-DOS 1.x.
+
+entry:    mov       ah, 0x30            ; DOS version
+          int       0x21
+          cmp       al, 0x02            ; 2.0 or later?
+          jae       okdos               ; Yes, so keep going.
+          mov       dx, edos1           ; Display error.
+          mov       ah, 0x09
+          int       0x21
+          int       0x20                ; DOS 1 EXIT
+
+okdos:    push      cs                  ; Free our memory, but reserve a full
+          pop       es                  ; segment for tanking the EXE file.
+          mov       bx, tail
+          mov       cl, 4
+          shr       bx, cl
+          inc       bx
+          mov       ah, 0x4A
+          int       0x21
+          jc        nomem
+          mov       ah, 0x48
+          mov       bx, 0x1000
+          int       0x21
+          jnc       getargs
+nomem:    mov       dx, eram
+          jmp short scream
+
+; Quick analysis of the command line for switches.  Accept /? but reject
+; anything else.
+
+getargs:  mov       [tankseg], ax       ; save normalized segment
+          mov       sp, stack
+          mov       di, 0x0081
+          cmp       byte [di], 0x0D     ; Is there anything?
+          jne       getchar             ; Yes, so scan.
+          mov       dx, eargs           ; No, so complain and die.
+          jmp short scream
+getchar:  mov       ah, [di]
+          cmp       ah, 0x0D            ; <Enter>?
+          je        scanned1            ; Yes, so this phase is complete.
+          cmp       ah, '/'
+          jne       advance             ; Not a slash, never mind.
+%ifdef HELP
+          mov       ah, [di+1]
+          cmp       ah, '?'             ; Got "/?" ?
+          je        dohelp              ; Yes, so display usage.
+%endif
+          mov       dx, eswitch         ; No, so simply display an error.
+%ifdef HELP
+          jmp short scream
+dohelp:   mov       dx, eusage          ; Usage message.
+%endif
+scream:   mov       ah, 0x09
+          int       0x21
+          mov       ax, 0x4C01          ; Exit with code 1
+          int       0x21                ; EXIT
+advance:  inc       di
+          cmp       di, 0x0100          ; End of command line?
+          jb        getchar             ; No, keep going.
+scanned1: mov       di, 0x0081          ; Start over, killing whitespace first.
+          call      killspc
+nextchr:  mov       ah, [di]            ; Next.
+          cmp       ah, 0x0D            ; <Enter>?
+          je        onearg              ; Yes, so we only have one parameter.
+          cmp       ah, ' '             ; <Space>?
+          je        twoarg              ; Yes, so we have at least two.
+          cmp       ah, 0x09            ; <Tab>?
+          je        twoarg              ; Same deal.
+          inc       di                  ; Keep going.
+          cmp       di, 0x0100
+          jb        nextchr
+
+; One argument:
+;   * Copy the filename to BOTH fname1 and fname2.
+;   * Replace the extension in fname2 with .BIN.
+;
+; Not one argument:
+;   * Copy the first filename to fname1.
+;   * Copy the second filename to fname2.
+;   * If a space or tab is found while scanning, die screaming.
+
+onearg:   mov       di, 0x0081          ; Back to the top.
+          call      killspc             ; Skip whitespace.
+          mov       si, fname1          ; Set up targets.
+          mov       bp, fname2
+copy1:    mov       ah, [di]            ; Keep going until you hit the end.
+          cmp       ah, 0x0D            ; <Enter>
+          je        copied1
+          mov       [si], ah            ; Copy to both buffers
+          mov       [bp], ah
+          inc       di
+          inc       si
+          inc       bp
+          cmp       di, 0x0100          ; End of the line
+          jb        copy1
+copied1:  mov       byte [si], 0x00     ; Add null terminators
+          mov       byte [bp], 0x00
+getdot:   dec       bp                  ; Does source file have an extension?
+          cmp       bp, 0x0081
+          jbe       nodot
+          cmp       byte [bp], '.'      ; Yes
+          je        gotdot
+          cmp       byte [bp], '\'      ; No
+          jne       getdot              ; Keep looking
+nodot:    inc       bp
+          cmp       byte [bp], 0x00
+          jne       nodot
+gotdot:   mov       byte [bp], '.'      ; Patch ".BIN" at the end
+          mov       word [bp+1], 0x4942
+          mov       word [bp+3], 0x004E
+          jmp short gotargs             ; We gotcha!
+          
+twoarg:   mov       di, 0x0081          ; Back to the top.
+          call      killspc             ; Skip whitespace.
+          mov       si, fname1          ; First target.
+copy2:    mov       ah, [di]
+          cmp       ah, ' '             ; Whitespace = done, and we DO have it
+          je        copied2
+          cmp       ah, 0x09
+          je        copied2
+          mov       [si], ah
+          inc       di
+          inc       si
+          jmp short copy2
+copied2:  mov       byte [si], 0x00     ; Null terminator
+          call      killspc
+          mov       si, fname2          ; Second target.
+copy3:    mov       ah, [di]
+          cmp       ah, 0x0D            ; CR = done
+          je        copied3
+          cmp       ah, ' '             ; Too many parameters.
+          je        synerr
+          cmp       ah, 0x09
+          jne       synok
+synerr:   mov       dx, eargs
+toscream: jmp       scream
+synok:    mov       [si], ah
+          inc       di
+          inc       si
+          cmp       di, 0x0100          ; End of the line.
+          jb        copy3
+copied3:  mov       byte [si], 0x00     ; Null terminator.
+
+; Read the MZ header.
+
+gotargs:  mov       ax, 0x3D00          ; Open file in default mode.
+          mov       dx, fname1
+          int       0x21
+          jnc       opened1
+          mov       dx, eopen1
+          jmp short toscream
+opened1:  mov       [handle], ax
+          mov       bx, ax
+          mov       ah, 0x3F            ; Read MZ header into memory.
+          mov       cx, 0x1E
+          mov       dx, mz_sig
+          int       0x21
+          jnc       gotmz
+mzerr:    call      close
+          mov       dx, eread
+          jmp short toscream
+gotmz:    cmp       word [mz_sig], 0x5A4D
+          jne       mzerr               ; Sorry, not MZ.
+          cmp       word [mz_pages], 0x0080
+          jb        gotroom             ; Too big to convert.
+nope:     mov       dx, enope
+          jmp short toscream
+gotroom:  mov       ax, [mz_pages]      ; How big is the image?
+          shl       ax, 1
+          mov       byte [fsize], 0x00  ; 512-byte pages to actual bytes.
+          mov       word [fsize+1], ax
+          mov       ax, [mz_xbyt]
+          or        ax, ax
+          je        allofit
+          dec       word [fsize+1]
+          dec       word [fsize+1]
+          add       word [fsize], ax
+allofit:  mov       ax, [mz_hdrln]      ; Subtract the size of the header.
+          mov       cl, 4
+          shl       ax, cl              ; 16-byte paragraphs to actual bytes.
+          sub       word [fsize], ax
+          mov       ax, [mz_reloc]      ; Make sure we have no relocations.
+          or        ax, ax
+          je        noreloc
+          mov       ax, [mz_cs]         ; If we do, is CS:IP 0000:0000?
+          or        ax, ax
+          jnz       nope                ; CS != 0, die screaming.
+          mov       ax, [mz_ip]
+          or        ax, ax              ; IP, then?
+          jnz       nope                ; Good enough.
+noreloc:  mov       ax, [mz_ss]         ; Make sure we have no explicit stack.
+          or        ax, ax
+          jne       nope
+          mov       ax, [mz_sp]
+          or        ax, ax
+          jne       nope
+          mov       ax, [mz_cs]         ; Make sure our CS is $0000 and our IP
+          mov       bx, [mz_ip]         ; is either $0000 or $0100.  If $0100,
+          or        ax, ax              ; skip the first 256 bytes of the
+          jne       hasaddr             ; image.
+          cmp       bx, 0x0100
+          je        iscom
+          or        bx, bx
+          je        notcom
+hasaddr:  mov       dx, eaddr           ; Nope, die screaming.
+          jmp       scream
+
+iscom:    add       word [mz_hdrln], 0x0010
+          sub       word [fsize], 0x0100
+notcom:   mov       ax, 0x4200          ; lseek()  (whence=SEEK_SET)
+          mov       dx, [mz_hdrln]      ; Jump over the header.
+          mov       cl, 4
+          shl       dx, cl
+          xor       cx, cx
+          mov       bx, [handle]
+          push      bx
+          int       0x21
+          pop       bx                  ; Read the image into memory.
+          mov       cx, [fsize]
+          mov       dx, [tankseg]
+          push      dx
+          pop       ds
+          xor       dx, dx
+          mov       ah, 0x3F
+          int       0x21
+          jnc       itwrkd
+          push      cs                  ; Read error, die screaming.
+          pop       ds
+          jmp       mzerr
+itwrkd:   push      cs
+          pop       ds
+          mov       ax, [mz_reloc]      ; Do relocations, if needed
+          or        ax, ax
+          jnz       loophex
+          jmp       writeit
+loophex:  mov       di, fupbuf+11       ; Prompt
+.1:       mov       byte [di], 0x00
+          dec       di
+          cmp       di, fupbuf
+          ja        .1
+          mov       byte [di], 0x0A
+          mov       dx, efixups
+          mov       ah, 0x09
+          int       0x21
+          mov       dx, fupbuf
+          mov       ah, 0x0A
+          int       0x21
+          mov       dx, ecrlf
+          mov       ah, 0x09
+          int       0x21
+          mov       dx, 0               ; Now convert hex string
+          mov       di, fupbuf+2
+.2:       cmp       di, fupaddr
+          je        .5
+          mov       ah, [di]
+          cmp       ah, 0x0D
+          je        .5
+          cmp       ah, '0'
+          jb        loophex
+          cmp       ah, '9'
+          ja        .3
+          sub       ah, '0'
+          jmp short .4
+.3:       cmp       ah, '@'
+          jb        loophex
+          and       ah, 0x5F            ; Smash case
+          cmp       ah, 'A'
+          jb        loophex
+          cmp       ah, 'F'
+          ja        loophex
+          sub       ah, ('A'-10)
+.4:       mov       cl, 4
+          shl       dx, cl
+          or        dl, ah
+          inc       di
+          jmp short .2
+.5:       mov       [fupaddr], dx       ; Save result
+          mov       bx, mz_reloc        ; Give enough room for the reloc table
+          times 2   shr bx, 1
+          inc       bx
+          mov       ah, 0x48
+          int       0x21
+          jnc       .6
+          mov       dx, eram
+          jmp       scream
+.6:       mov       [fupseg], ax
+
+; Now do the relocation.
+
+          mov       ax, 0x4200          ; Seek to the beginning of the reloc
+          mov       bx, [handle]        ; table.
+          xor       cx, cx
+          mov       dx, [mz_rlcpt]
+          int       0x21
+          jnc       .7
+          jmp       mzerr
+.7:       mov       bx, [handle]        ; Load reloc table.
+          mov       cx, mz_reloc        ; Length is mz_reloc*4.
+          times 2   shl cx, 1
+          mov       dx, [fupseg]
+          push      dx
+          pop       ds
+          xor       dx, dx
+          mov       ah, 0x3F
+          int       0x21
+          jnc       .8
+          push      cs
+          pop       ds
+          jmp       mzerr
+.8:       push      cs
+          pop       ds
+          mov       dx, [mz_reloc]      ; Number of relocations.
+          mov       cx, [tankseg]       ; DS to segment of data, ES to reloc
+          mov       bx, [fupseg]        ; table.
+          push      cx
+          pop       ds
+          push      bx
+          pop       es
+          xor       di, di
+.9:       mov       ax, [es:di+2]       ; Get next relocation entry.
+          mov       cl, 4
+          shl       ax, cl              ; Normalize it.
+          add       ax, [es:di]
+          add       di, 4               ; Next
+          mov       si, ax              ; Get address
+          mov       bx, [cs:fupaddr]    ; Apply relocation
+          add       bx, [si]
+          mov       [si], bx
+          dec       dx                  ; Tick down
+          jne       .9
+          push      cs                  ; Restore original DS and ES regs
+          pop       ds
+          push      cs
+          pop       es
+
+writeit:  call      close
+          mov       dx, fname2          ; creat() the new file.
+          xor       cx, cx
+          mov       ah, 0x3C
+          int       0x21
+          jnc       opened2
+          mov       dx, eopen2          ; Failed to create it, die screaming.
+          jmp short iiscream
+opened2:  mov       [handle], ax        ; Now get ready to write it.
+          mov       bx, ax
+          mov       cx, [fsize]
+          mov       ah, 0x40            ; write()
+          mov       dx, [tankseg]
+          push      dx
+          pop       ds
+          xor       dx, dx
+          int       0x21
+          jnc       cleanup
+          push      cs                  ; Write error, die screaming.
+          pop       ds
+          mov       dx, ewrite
+iiscream: jmp       scream
+cleanup:  push      cs
+          pop       ds
+          call      close
+          mov       ax, 0x4C00          ; Exit with code 0
+          int       0x21                ; EXIT
+
+close:    mov       bx, [handle]
+          mov       ah, 0x3E
+          int       0x21
+          ret
+
+killspc:  cmp       byte [di], ' '      ; Keep pushing DI as long as it points
+          je        .1                  ; to whitespace (space or tab), and is
+          cmp       byte [di], 0x09     ; not out of the command line area.
+          jne       ksret
+.1:       inc       di
+          cmp       di, 0x0100
+          jb        killspc
+ksret:    ret
+
+edos1:    db        "Incorrect DOS version", 13, 10, "$"
+eargs:    db        "Invalid number of parameters", 13, 10, "$"
+eswitch:  db        "Invalid switch", 13, 10, "$"
+eram:     db        "Insufficient memory", 13, 10, "$"
+eopen1:   db        "File not found", 13, 10, "$"
+eopen2:   db        "File creation error", 13, 10, "$"
+enope:    db        "File cannot be converted", 13, 10, "$"
+eaddr:    db        "Invalid start address", 13, 10, "$"
+efixups:  db        "Fixups needed, enter base segment (hex): $"
+eread:    db        "Read error", 13, 10, "$"
+%ifdef HELP
+ewrite:   db        "Write error", 13, 10, "$"
+eusage:   db        "Converts .EXE (executable) files to binary format."
+          db        13, 10, 13, 10
+          db        "EXE2BIN [drive1:][path1]inputfile"
+          db          " [[drive2:][path2]outputfile]", 13, 10, 13, 10
+          db        "  input-file   Specifies the .EXE file to be converted."
+          db        13, 10
+          db        "  output-file  Specifies the binary file to be created."
+          ; FALL INTO
+%else
+ewrite:   db        "Write error"       ; FALL INTO
+%endif
+ecrlf:    db        13, 10, "$"
+
+fupbuf:   db        0x0A
+
+; BSS
+
+fupaddr   equ       fupbuf+11
+fupseg    equ       fupaddr+2
+
+tankseg   equ       fupseg+2
+handle    equ       tankseg+2           ; Segment for reading/writing files
+
+fname1    equ       handle+2            ; Filename buffers.
+fname2    equ       fname1+64
+
+fsize     equ       fname2+64           ; For computing the size of the image.
+
+; EXE file header.  Some of these values are not used.
+
+mz_sig    equ       fsize+4
+mz_xbyt   equ       mz_sig+2
+mz_pages  equ       mz_xbyt+2
+mz_reloc  equ       mz_pages+2
+mz_hdrln  equ       mz_reloc+2
+mz_requr  equ       mz_hdrln+2
+mz_reqst  equ       mz_requr+2
+mz_ss     equ       mz_reqst+2
+mz_sp     equ       mz_ss+2
+mz_cksum  equ       mz_sp+2
+mz_ip     equ       mz_cksum+2
+mz_cs     equ       mz_ip+2
+mz_rlcpt  equ       mz_cs+2
+mz_ovl    equ       mz_rlcpt+2
+mz_ovldt  equ       mz_ovl+2
+
+stack     equ       mz_ovldt+2
+
+tail      equ       stack+32            ; No further 

@@ -1,0 +1,12 @@
+Regarding copyright on font data in GRAFTABL.COM and CPI files
+==============================================================
+
+  In the United States, fonts are not copyrightable, though the vector data
+  used to generate them can be copyrighted (e.g., TTFs, OTFs).  In most other
+  countries, if there is a copyright on fonts or typefaces, they are generally
+  limited to 25 years or less.  This font data dates back at least to 1987
+  (release of PC DOS 3.3).
+  
+  It is my belief that, my sampling of the data from Windows 95 in 2000
+  notwithstanding, I am not violating any laws in the US or in most countries
+  by including this bitmap data in the necessary files.

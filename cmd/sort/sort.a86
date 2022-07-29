@@ -1,0 +1,583 @@
+; Copyright 2022 S. V. Nickolas.
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy 
+; of this software and associated documentation files (the "Software"), to 
+; deal with the Software without restriction, including without limitation the 
+; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
+; sell copies of the Software, and to permit persons to whom the Software is 
+; furnished to do so, subject to the following conditions:
+;
+;   1. Redistributions of source code must retain the above copyright notice, 
+;      this list of conditions and the following disclaimers.
+;   2. Redistributions in binary form must reproduce the above copyright 
+;      notice, this list of conditions and the following disclaimers in the 
+;      documentation and/or other materials provided with the distribution.
+;   3. The name of the author may not be used to endorse or promote products 
+;      derived from this Software without specific prior written permission.
+;
+; THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
+; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+;
+; IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+; SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+; PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+; SORT
+;
+; There is a 64K limit.  This makes things a lot easier for us - we can simply 
+; reserve us 4096 paragraphs and slurp the whole file into that.  It is a
+; limitation officially documented by both Microsoft and IBM.  (In fact, the
+; specific means by which we slurp the file into memory was taken from the MS
+; version; the total of maybe 6 lines is probably easy Fair Use considering
+; the code was released by MS under more or less the same terms as above.)
+;
+; What we do that is different from MS-DOS here is we tally up the lines and
+; store pointers in a separate table, so we can go through and just swap them
+; around to move the lines.
+;
+; Note that because output is through AH=02, we cannot detect an error 
+; condition when writing to stdout.  The MS-DOS 2.11 version will detect this
+; and output "Insufficient disk space" on stderr in that case.
+
+          cpu       8086
+          org       0x0100
+
+; Make sure we're not running on MS-DOS 1.x.
+
+entry:    mov       ah, 0x30            ; DOS version
+          int       0x21
+          cmp       al, 0x02            ; 2.0 or later?
+          jae       okdos               ; Yes, so keep going.
+          mov       dx, edos1           ; Display error.
+          mov       ah, 0x09
+          int       0x21
+          int       0x20                ; DOS 1 EXIT
+edos1:    db        "Incorrect DOS version$"
+
+okdos:    xchg      ah, al              ; Save DOS version; how we get our
+          mov       [dosver], ax        ; case table depends on this (above).
+          call      gettab              ; Get tables, if possible.
+          push      cs                  ; Free our memory, but reserve a full
+          pop       es                  ; segment for tanking the input.
+          mov       bx, tail
+          mov       cl, 4
+          shr       bx, cl
+          inc       bx
+          mov       ah, 0x4A
+          int       0x21
+          jc        nomem
+          mov       ah, 0x48
+          mov       bx, 0x1000
+          int       0x21
+          jnc       getargs
+nomem:    mov       di, eram
+scream:   push      cs                  ; Restore DS to code segment.
+          pop       ds
+          xor       cx, cx              ; Length counter
+          push      di                  ; Save pointer
+.1:       mov       ah, [di]            ; Count length
+          or        ah, ah
+          je        .2
+          inc       di
+          inc       cx
+          jmp short .1
+.2:       pop       dx                  ; Restore pointer, but to DX
+          mov       bx, 0x0002          ; stderr
+          mov       ah, 0x40            ; WRITE
+          int       0x21
+          mov       ax, 0x4C01
+          int       0x21                ; EXIT code 1
+
+killspc:  cmp       byte [di], ' '      ; Keep pushing DI as long as it points
+          je        .1                  ; to whitespace (space or tab), and is
+          cmp       byte [di], 0x09     ; not out of the command line area.
+          jne       ksret
+.1:       inc       di
+          cmp       di, 0x0100
+          jb        killspc
+ksret:    ret
+
+getargs:  mov       [tankseg], ax       ; save normalized segment
+          mov       di, 0x0081
+nxtchar:  call      killspc
+          cmp       di, 0x0100
+          je        gotargs
+          mov       ah, [di]
+          cmp       ah, 0x0D
+          je        gotargs
+          cmp       ah, '/'             ; Switch?
+          je        switch
+          mov       di, earg
+          jmp short scream
+switch:   inc       di
+          mov       ah, [di]
+          inc       di
+          cmp       ah, 'a'             ; Smash case of switch
+          jb        .1
+          cmp       ah, 'z'
+          ja        .1
+          and       ah, 0x5F
+.1:       cmp       ah, 'R'
+          je        do_rev
+          cmp       ah, '+'
+          je        do_plus
+%ifdef HELP
+          cmp       ah, '?'
+          je        do_help
+%endif
+          mov       [xswitch], ah
+          mov       di, eswitch
+          jmp short scream
+%ifdef HELP
+do_help:  mov       dx, help
+          mov       ah, 0x09
+          int       0x21
+          mov       ax, 0x4C00
+          int       0x21                ; EXIT code 0
+%endif
+do_rev:   mov       ah, 0x73            ; replace JBE (jump on below/equal)
+          mov       [patchme], ah       ; with JAE (jump on above/equal)
+                                        ; to reverse sort
+          jmp short nxtchar
+do_plus:  mov       ah, [di]            ; Read digits.
+          cmp       ah, '0'
+          jb        nxtchar
+          cmp       ah, '9'
+          ja        nxtchar
+          and       ah, 0x0F
+          mov       bl, ah
+          xor       bh, bh
+          mov       ax, 0x000A
+          mul       word [column]
+          add       ax, bx
+          mov       [column], ax
+          inc       di
+          jmp short do_plus
+
+gotargs:  mov       dx, [tankseg]
+          mov       ds, dx
+          xor       dx, dx
+          xor       cx, cx
+          dec       cx                  ; Initially, CX=65535
+.1:       xor       bx, bx              ; Read up to CX bytes from stdin.
+          mov       ah, 0x3F
+          int       0x21
+          jnc       .2
+          push      cs                  ; C will be set for "invalid handle"
+          pop       ds                  ; or "access denied".  The former is
+          mov       di, egtfo           ; preposterous on stdin, so obviously
+          jmp       scream              ; our error is the latter.
+.2:       add       dx, ax              ; Move up the pointer.
+          sub       cx, ax              ; Move down the size limit.
+          jz        nomem 
+          or        ax, ax              ; EOF condition?
+          jnz       .1                  ; No, keep going.
+          mov       [cs:filsiz], dx
+.3:       xor       bx, bx              ; Count lines
+          xor       di, di
+.4:       mov       ah, [di]
+          cmp       ah, 0x1A            ; EOF
+          je        .6
+          mov       ax, [di]
+          cmp       ax, 0x0A0D          ; CRLF
+          jne       .5
+          inc       bx
+          jz        nomem               ; Sanity check.
+          inc       di
+.5:       inc       di
+          cmp       di, [cs:filsiz]
+          jb        .4
+.6:       mov       byte [di], 0
+          mov       [cs:lincnt], bx
+          shr       bx, 1               ; To paragraphs.
+          shr       bx, 1
+          inc       bx
+          mov       ah, 0x48
+          int       0x21
+          jc        overflow
+          mov       [cs:tanklins], ax
+          xor       di, di
+          xor       si, si
+          xor       dx, dx
+          mov       es, ax
+.7:       mov       ah, [di]
+          cmp       ah, 0x1A            ; EOF
+          je        .9
+          mov       ax, [di]
+          cmp       ax, 0x0A0D          ; CRLF
+          jne       .8
+          mov       word [di], 0x0000
+          mov       [es:si], dx
+          mov       dx, di
+          inc       dx
+          inc       dx
+          inc       si
+          inc       si
+          inc       di
+.8:       inc       di
+          cmp       di, [cs:filsiz]
+          jb        .7
+.9:       mov       word [es:si], 0x0000
+          push      cs
+          pop       ds
+          push      cs
+          pop       es
+          call      doit
+          mov       dx, [tankseg]
+          mov       cx, [tanklins]
+          mov       es, cx
+          mov       ds, dx
+          xor       si, si
+.10:      mov       di, [es:si]         ; Pointer to next line.
+          inc       si
+          inc       si
+.11:      mov       dl, [ds:di]
+          or        dl, dl              ; EOL?
+          jz        .12                 ; Yes, go get the next one.
+          mov       ah, 0x02
+          int       0x21                ; Print character.
+          inc       di
+          jmp short .11
+.12:      mov       dl, 0x0D            ; Write CRLF.
+          mov       ah, 0x02
+          int       0x21
+          mov       dl, 0x0A
+          mov       ah, 0x02
+          int       0x21
+          inc       di
+          inc       di
+          dec       word [cs:lincnt]
+          jnz       .10                 ; Get next line.
+          mov       ax, 0x4C00
+          int       0x21
+
+overflow: jmp       nomem
+
+; A stupid bubble sort.
+; (Correction: This is actually the "exchange sort" algorithm, with an extra
+;  verification pass - slightly smarter than a bubble sort.)
+
+doit:     push      cs                  ; Reset all our variables.
+          pop       ds
+          mov       bx, [lincnt]        ; Turn this into an end-of-table pointer
+          dec       bx
+          shl       bx, 1
+sorttop:  xor       cl, cl              ; Dirty bit (the time)
+          xor       bp, bp
+loop1:    mov       dx, bp
+          inc       dx
+          inc       dx
+loop2:    push      cx
+          mov       cx, [tanklins]
+          mov       es, cx
+          pop       cx
+          mov       di, [es:bp]
+          push      bp
+          mov       bp, dx
+          mov       si, [es:bp]
+          pop       bp
+          call      cmpstr
+patchme:  jbe       noswap
+          mov       cl, 0x01            ; Dirty bit (the time)
+          push      ax                  ; Swap line pointers
+          push      bx
+          mov       ax, [es:bp]
+          push      bp
+          mov       bp, dx
+          mov       bx, [es:bp]
+          mov       [es:bp], ax
+          pop       bp
+          mov       [es:bp], bx
+          pop       bx
+          pop       ax
+noswap:   push      cs
+          pop       es
+          inc       dx
+          inc       dx
+          cmp       dx, bx
+          jb        loop2
+          inc       bp
+          inc       bp
+          cmp       bp, bx
+          jb        loop1
+          or        cl, cl              ; Did anything change this pass?
+          jnz       sorttop             ; Go back, Jack, and do it again
+          ret
+
+cmpstr:   push      di
+          push      si
+          push      ax
+          mov       ax, [cs:tankseg]
+          mov       ds, ax
+          mov       ax, [cs:column]     ; Account for /+xxxxx if used
+          or        ax, ax              ; ...IF
+          jz        .1
+          dec       ax                  ; 0-offset
+          add       di, ax
+          add       si, ax
+.1:       mov       ah, [di]            ; Check for EOL.
+          mov       al, [si]
+          or        ah, ah
+          jz        .2                  ; DI is EOL, SI is probably not
+          or        al, al
+          jz        .2                  ; SI is EOL, DI is probably not
+          call      cmpchr              ; Do actual comparison
+          jne       .3                  ; They differ; exit with CMP flags set
+          inc       di                  ; Next char
+          inc       si
+          jmp short .1                  ; Go back, Jack, and do it again
+.2:       cmp       ah, al              ; Return comparison of zero & nonzero.
+.3:       pop       ax                  ; Restore registers.
+          pop       si
+          pop       di
+          push      cs
+          pop       ds
+          ret
+
+cmpchr:   push      ax
+          push      bx
+          push      cx
+          push      bp
+          mov       al, [di]            ; Smash case.
+          xor       ah, ah
+          mov       bp, ax
+          mov       ch, [cs:louprtab+bp]
+          mov       al, [si]
+          mov       bp, ax
+          mov       cl, [cs:louprtab+bp]
+          mov       al, ch              ; Get indices into collation table.
+          mov       bp, ax
+          mov       bh, [cs:colltab+bp]
+          mov       al, cl
+          mov       bp, ax
+          mov       bl, [cs:colltab+bp]
+          cmp       bh, bl              ; Do the actual comparison.
+          pop       bp
+          pop       cx
+          pop       bx
+          pop       ax
+          ret
+
+; Get collation and uppercase tables, if available; if not, use internal
+; tables instead.
+;
+; The way to get sorting information on MS-DOS 3.3 and later is AX=$6506,
+;   CX=5, ES:DI = pointer to a 5-byte block which will be filled in as
+;   follows:
+;         db        0x06
+;         dd        ?                   ; far pointer to table
+; The table starts with the word 0x0100 (length).
+; The remainder is the 256 bytes in sort order.
+;
+; The way to get uppercase information on MS-DOS 3.3 and later is AX=$6502,
+;   with the same other regs, and ES:DI will be filled out thus:
+;         db        0x02
+;         db        ?                   ; far pointer to table
+; This one will start with the word 0x0080.  louprtab can be used for all
+; countries.
+;
+; In both cases, BX and DX should be set to FFFF.
+;
+; Note that louprtab must be IMMEDIATELY followed by hiuprtab for things to
+; work correctly (they add up to a single 256-byte table).
+
+gettab:   mov       ax, [dosver]        ; DOS 3.3?
+          cmp       ax, 0x031E
+          jae       tab330              ; Yes, get localized tables
+          cmp       ax, 0x020B          ; DOS 2.11?
+          jae       tab211
+backret:  ret
+tab211:   mov       ax, 0x3800          ; Limited in what we can do on 2.11.
+          mov       dx, oldtab
+          int       0x21
+          jc        backret
+          mov       ax, [casmap]        ; ALERT: SELF-MODIFYING CODE
+          mov       bx, [casmap+2]
+          mov       [.2], ax
+          mov       [.2+2], bx
+          mov       byte [nlstank], 0x80
+.1:       mov       al, [nlstank]
+          db        0x9A                ; CALL FAR
+.2:       dd        0xFFFF0000          ; if not patched does an 8086 REBOOT
+                                        ; (Yes, I know this is a dangerous
+                                        ;  choice; any other choice might be
+                                        ;  worse.  Safety netting into a
+                                        ;  virtual reset is probably the best
+                                        ;  failsafe we can pull off here.)
+          mov       bl, [nlstank]       ; offset into table
+          xor       bh, bh
+          mov       di, louprtab        ; remember, starting at 128 not 0
+          add       di, bx
+          mov       [di], al
+          inc       byte [nlstank]
+          jnz       .1
+          ret
+tab330:   mov       ax, 0x6506          ; Collation table
+          mov       cx, 0x0005
+          mov       di, nlstank
+          mov       bx, 0xFFFF
+          mov       dx, bx
+          int       0x21
+          jc        .1                  ; failed
+          cmp       byte [nlstank], 0x06
+          jne       .1                  ; failed
+          mov       si, word [nlsptr]   ; source to DS:SI
+          inc       si
+          inc       si
+          mov       dx, word [nlsptr+2]
+          mov       di, colltab         ; target to ES:DI
+          push      cs
+          pop       es
+          mov       ds, dx
+          mov       cx, 0x0100
+          rep movsb
+          push      cs                  ; Restore original DS
+          pop       ds
+          mov       ax, 0x6502          ; Uppercase table
+          mov       cx, 0x0005
+          mov       di, nlstank
+          mov       bx, 0xFFFF
+          mov       dx, bx
+          int       0x21
+          jc        .1                  ; failed
+          cmp       byte [nlstank], 0x02
+          jne       .1                  ; failed
+          mov       si, word [nlsptr]   ; source to DS:SI
+          inc       si
+          inc       si
+          mov       dx, word [nlsptr+2]
+          mov       di, hiuprtab        ; target to ES:DI
+          push      cs
+          pop       es
+          mov       ds, dx
+          mov       cx, 0x0080
+          rep movsb
+          push      cs                  ; Restore original DS
+          pop       ds
+.1:       ret
+
+; Errors to be spat to stderr should be C-strings rather than CP/M strings.
+
+eram:     db        "Insufficient memory", 13, 10, 0
+earg:     db        "Too many arguments", 13, 10, 0
+egtfo:    db        "Access denied", 13, 10, 0
+eswitch:  db        "Invalid switch - /"
+xswitch:  db        0, 13, 10, 0
+
+%ifdef HELP
+help:     db        "Sorts input and writes results to the screen, a file, or"
+          db         " another device.", 13, 10, 13, 10
+          db        "SORT [/R] [/+n] < [drive1:][path1]filename1"
+          db         " [> [drive2:][path2]filename2]", 13, 10
+          db        "[command |] SORT [/R] [/+n]"
+          db         " [> [drive2:][path2]filename2]", 13, 10, 13, 10
+          db        "  /R                         Reverses the sort order;"
+          db         " that is, sorts Z to A,", 13, 10
+          db        "                             then 9 to 0.", 13, 10
+          db        "  /+n                        Sorts the file according to"
+          db        " characters in", 13, 10
+          db        "                             column n.", 13, 10
+          db        "  [drive1:][path1]filename1  Specifies a file to be"
+          db         " sorted.", 13, 10
+          db        "  [drive2:][path2]filename2  Specifies a file where the"
+          db         " sorted input is to be ", 13, 10
+          db        "                             stored.", 13, 10
+          db        "  command                    Specifies a command whose"
+          db         " output is to be sorted.", 13, 10, "$"
+%endif
+
+; Before 3.3, just use this:
+
+colltab:  db        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+          db        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
+          db        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17
+          db        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F
+          db        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27
+          db        0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F
+          db        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37
+          db        0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
+          db        0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47
+          db        0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
+          db        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57
+          db        0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F
+          db        0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67
+          db        0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F
+          db        0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77
+          db        0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F
+          db        0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87
+          db        0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F
+          db        0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97
+          db        0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F
+          db        0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7
+          db        0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF
+          db        0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7
+          db        0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF
+          db        0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7
+          db        0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF
+          db        0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7
+          db        0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF
+          db        0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7
+          db        0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF
+          db        0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7
+          db        0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF
+
+louprtab: db        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+          db        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
+          db        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17
+          db        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F
+          db        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27
+          db        0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F
+          db        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37
+          db        0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
+          db        0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47
+          db        0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
+          db        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57
+          db        0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F
+          db        0x60, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47
+          db        0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
+          db        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57                                              
+          db        0x58, 0x59, 0x5A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F
+hiuprtab: db        'C',  'U',  'E',  'A',  'A',  'A',  'A',  'C'
+          db        'E',  'E',  'E',  'I',  'I',  'I',  'A',  'A'
+          db        'E',  'A',  'A',  'O',  'O',  'O',  'U',  'U'
+          db        'Y',  'O',  'U',  '$',  '$',  '$',  '$',  '$'
+          db        'A',  'I',  'O',  'U',  'N',  'N',  0xA6, 0xA7
+          db        '?',  0xA9, 0xAA, 0xAB, 0xAC, '!',  '"',  '"'
+          db        0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7
+          db        0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF
+          db        0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7
+          db        0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF
+          db        0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7
+          db        0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF
+          db        'S',  0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7
+          db        0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF
+          db        0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7
+          db        0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF
+
+; Cannot be optimized into BSS
+
+column:   dw        0x0000
+
+; BSS
+
+dosver    equ       $
+
+filsiz    equ       dosver+2
+lincnt    equ       filsiz+2
+
+tankseg   equ       lincnt+2
+tanklins  equ       tankseg+2
+
+; Table used for country info from 2.11 until 3.2x
+
+oldtab    equ       tanklins+2
+casmap    equ       oldtab+18
+nlstank   equ       casmap+16
+nlsptr    equ       nlstank+1
+
+tail      equ       nlsptr+4

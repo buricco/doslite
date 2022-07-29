@@ -1,0 +1,397 @@
+; Copyright 2022 S. V. Nickolas.
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy 
+; of this software and associated documentation files (the "Software"), to 
+; deal with the Software without restriction, including without limitation the 
+; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
+; sell copies of the Software, and to permit persons to whom the Software is 
+; furnished to do so, subject to the following conditions:
+;
+;   1. Redistributions of source code must retain the above copyright notice, 
+;      this list of conditions and the following disclaimers.
+;   2. Redistributions in binary form must reproduce the above copyright 
+;      notice, this list of conditions and the following disclaimers in the 
+;      documentation and/or other materials provided with the distribution.
+;   3. The name of the author may not be used to endorse or promote products 
+;      derived from this Software without specific prior written permission.
+;
+; THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
+; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+;
+; IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+; SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+; PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+; ============================================================================
+; THIS PROGRAM IS BROKEN, but here are some things to know about it:
+;
+; 1. Currently it functions as an input filter.  Hooks are present so that it
+;    would not be difficult to change it into a replacement console driver.
+; 2. There is nowhere to implement the keyboard redefinition functionality of
+;    ANSI.SYS; this is intentional.  This "feature" is not just dangerous, it
+;    is a goatse-sized gaping maw just waiting for someone to use a simple
+;    innocuous-looking text file as a way to redefine every key to "deltree /y
+;    c:\" or use a buffer overrun exploit to do something similarly nefarious.
+; 3. Not all the gories of ANSI.SYS are fully understood as far as required by
+;    the MODE command in MS-DOS 4.0 and later, which should be supported by
+;    DOSLITE's ANSI.SYS as well.  We do know that it takes INT 0x2F, AH=0x1A,
+;    AL <= 0x02, and that if AL=0, it will return AL=0xFF, but other functions
+;    do not seem to be well understood, looking at RBIL.
+; ============================================================================
+
+          cpu       8086
+          org       0x0100
+entry:    mov       ah, 0x30
+          int       0x21
+          xchg      ah, al
+          cmp       ax, 0x0200
+          jae       okdos
+          mov       dx, edos1
+          mov       ah, 0x09
+          int       0x21
+          int       0x20                ; DOS 1 EXIT
+
+okdos:    call      resetty             ; FALL INTO
+
+; ============================================================================
+; Main loop
+; ============================================================================
+
+top:      mov       ah, 0x3F            ; READ
+          xor       bx, bx              ; stdin
+          mov       cx, 1               ; 1 byte
+          mov       dx, chrbuf
+          int       0x21
+          jc        .1
+          or        ax, ax              ; EOF if zero
+          jnz       .2
+.1:       mov       ax, 0x4C00
+          int       0x21                ; EXIT CODE 0
+.2:       mov       ah, [chrbuf]
+          call      parse
+          jmp short top
+
+; ============================================================================
+; A replacement "int 0x29" handler could just "call altparse".
+;
+; The "resetty" function is called at startup, but for an ANSI.SYS
+; implementation, it should be called after every "int 0x10/ah=0x00" to make
+; sure that maxrow and maxcol are set appropriately.
+; ============================================================================
+
+altparse: push      ax
+          push      bx
+          push      cx
+          push      dx
+          push      bp
+          push      si
+          push      di
+          mov       [chrbuf], al
+          mov       ah, al
+          call      parse
+          pop       di
+          pop       si
+          pop       bp
+          pop       dx
+          pop       cx
+          pop       bx
+          pop       ax
+          ret
+
+resetty:  mov       ah, 0x12            ; do we have an EGA?
+          mov       bx, 0xFF10
+          mov       cx, 0xFFFF
+          int       0x10
+          cmp       cx, 0xFFFF          ; unchanged = MDA or CGA
+          je        .1                  ;   = always 25 lines
+          mov       ax, 0x0040          ; otherwise, lines-1 is stored at
+          push      es                  ;   0040:0084
+          mov       es, ax
+          mov       ah, [es:0x0084]
+          pop       es
+          mov       [maxrow], ah
+.1:       mov       ah, 0x0F            ; this, OTOH, works on anything
+          int       0x10
+          dec       ah
+          mov       [maxcol], ah
+          ret
+
+; ============================================================================
+; ANSI parser.
+; ============================================================================
+
+parse:    cmp       ah, 0x1B            ; always sets mode 1
+          jne       .1
+          mov       byte [mode], 1
+          ret
+.1:       cmp       byte [mode], 1
+          ja        .4                  ; mode=2: parse ANSI
+          je        .2                  ; mode=1: check for [
+          call      putch               ; mode=0: no parsing
+          ret
+.2:       cmp       ah, '['
+          je        .3
+          dec       byte [mode]         ; set mode back to 0
+          ret
+.3:       inc       byte [mode]         ; set mode to 2 and init vars
+          mov       word [pbufptr], pbuf
+          mov       byte [pbuf], 0
+          ret
+.4:       cmp       ah, '0'
+          jb        reset               ; Error
+          cmp       ah, '9'
+          jbe       digit               ; Got 0-9, process as a digit.
+          cmp       ah, ';'             ; Start a new numeric value
+          je        advance
+          cmp       ah, 'A'             ; ^[[A=UP
+          jb        reset               ; Error
+          je        up
+          cmp       ah, 'C'
+          jb        down                ; ^[[B=DOWN
+          je        right               ; ^[[C=RIGHT
+          cmp       ah, 'D'             ; ^[[D=LEFT
+          je        left
+          cmp       ah, 'H'             ; ^[[x;yH=GOTOXY
+          je        gotoxy
+          cmp       ah, 'I'
+          jb        reset               ; Error
+          cmp       ah, 'K'             ; ^[[J=CLRSCR (supposed to require 2J,
+          jb        clrscr              ;   but we take any or no argument)
+          je        clreol              ; ^[[K=CLREOL
+          cmp       ah, 'f'             ; ^[[x;yf=GOTOXY
+          je        gotoxy
+          cmp       ah, 'h'             ; ^[[nh=SETMODE + WRAPON
+          je        wrapon
+          cmp       ah, 'l'             ; ^[[nl=SETMODE + WRAPOFF
+          je        wrapoff
+          cmp       ah, 'm'             ; ^[[m=COLOR, this one is complicated.
+          je        color
+reset:    mov       byte [mode], 0      ; reset state and exit
+          ret
+advance:  inc       byte [dirty]        ; from 0xFF back to 0x00
+          ret
+
+wrapon:   mov       byte [wrap], 0xFF
+          jmp short wrapcmn
+wrapoff:  mov       byte [wrap], 0x00
+wrapcmn:  mov       di, [pbuf]
+          cmp       di, [pbufptr]
+          jne       .1
+          xor       ax, ax              ; Mode 0x00
+          jmp short .2
+.1:       xor       ah, ah
+          dec       di
+          mov       al, [pbufptr]
+.2:       int       0x10
+          jmp short reset
+
+clrscr:   mov       ax, 0x0600          ; method used by MS-DOS COMMAND.COM
+          mov       bh, [attr]
+          xor       cx, cx
+          mov       dx, [maxcol]        ; pulls in maxrow also
+          push      bp                  ; BUG WORKAROUND
+          int       0x10
+          pop       bp
+          xor       dx, dx
+          call      putxy
+          jmp short reset
+clreol:   call      getxy
+          xor       ch, ch
+          mov       cl, [maxcol]
+          sub       cl, dl              ; number of spaces to write
+          mov       ax, 0x0920          ; 0x20=' '
+          mov       bh, ch
+          mov       bl, [attr]
+          int       0x10
+toreset:  jmp short reset
+
+getxy:    mov       ah, 0x03
+          jmp short xycom
+putxy:    mov       ah, 0x02
+xycom:    xor       bh, bh
+          int       0x10
+          ret
+up:       call      getxy
+          or        dh, dh
+          jz        udlrexit
+          dec       dh
+          jmp short udlrcmn
+down:     call      getxy
+          inc       dh
+          jmp short udlrcmn
+left:     call      getxy
+          or        dl, dl
+          jz        udlrexit
+          dec       dl
+          jmp short udlrcmn
+right:    call      getxy
+          inc       dl
+udlrcmn:  call      putxy
+udlrexit: jmp short toreset             ; Shared by below
+gotoxy:   mov       dx, [pbufptr]
+          sub       dx, pbuf
+          cmp       dx, 2
+          jae       .1
+          xor       dx, dx              ; Top left
+          jmp short .2
+.1:       mov       di, [pbufptr]
+          mov       dx, [di-2]
+          xchg      dh, dl
+          dec       dh
+          dec       dl
+.2:       call      putxy
+          jmp short udlrexit
+
+digit:    cmp       byte [dirty], 0     ; Add to existing value?
+          jne       .1                  ; Z=no, NZ=yes
+          and       ah, 0x1F            ; make digit
+          mov       [pbufptr], ah
+          dec       byte [dirty]        ; 0xFF
+          inc       word [pbufptr]
+          ret
+.1:       mov       ax, 10
+          mul       byte [pbufptr-1]
+          mov       ah, [chrbuf]        ; get the byte again
+          and       ah, 0x1F
+          add       byte [pbufptr-1], ah
+          ret
+
+color:    mov       si, pbuf
+          cmp       si, [pbufptr]       ; No flags = reset everything
+          jne       .3
+.1:       mov       byte [attr], 0x07
+.2:       ret
+.3:       mov       ah, [si]
+          cmp       ah, 1
+          jb        .1                  ; 0=reset
+          je        .4                  ; 1=bold
+          cmp       ah, 3
+          jbe       .2                  ; error
+          cmp       ah, 5
+          jb        .5                  ; 4=underscore
+          je        .6                  ; 5=blink
+          cmp       ah, 6
+          je        .2                  ; error
+          cmp       ah, 8
+          jb        .7                  ; 7=inverse
+          je        .8                  ; 8=hidden
+          cmp       ah, 30
+          jb        .2                  ; error
+          cmp       ah, 38
+          jb        .9                  ; 3x=foreground
+          cmp       ah, 40
+          jb        .2                  ; error
+          cmp       ah, 47
+          ja        .2                  ; error
+          sub       ah, 40
+          call      getattr
+          mov       cl, 4
+          shl       ah, cl
+          and       byte [attr], 0x0F
+          or        byte [attr], ah
+          jmp short .10
+.4:       or        byte [attr], 0x08
+          jmp short .10
+.5:       and       byte [attr], 0x88   ; keep intense/blink
+          or        byte [attr], 0x01   ; only really works on MDPA but MS-DOS
+          jmp short .10                 ;   does basically this
+.6:       or        byte [attr], 0x80
+          jmp short .10
+.7:       mov       ah, [attr]          ; swap nibbles of attr
+          mov       al, ah
+          and       ah, 0x0F
+          and       al, 0xF0
+          mov       cl, 4
+          shl       ah, cl
+          shr       al, cl
+          or        ah, al
+          mov       [attr], ah
+          jmp short .10
+.8:       mov       byte [attr], 0x00
+          jmp short .10
+.9:       call      getattr
+          and       byte [attr], 0xF0
+          or        byte [attr], ah
+.10:      jmp       reset
+
+getattr:  mov       bl, ah
+          xor       bh, bh
+          mov       ah, [coltab+bx]
+          ret
+
+biostty:  mov       al, ah
+          mov       ah, 0x0E
+          xor       bh, bh
+          int       0x10
+toreset2: jmp       reset
+tab:      call      getxy
+          mov       cl, 8
+          and       dl, 0x07
+          sub       cl, dl              ; how many bytes to space?
+          xor       ch, ch
+          mov       ax, 0x0920          ; 0x20=' '
+          mov       bh, ch
+          mov       bl, [attr]
+          int       0x10
+          call      getxy               ; again
+          and       dl, 0x07
+          add       dl, 0x08
+          cmp       dl, [maxcol]
+          ja        crlf
+          call      putxy
+          jmp short toreset2
+putch:    cmp       ah, 0x07
+          je        biostty
+          cmp       ah, 0x08
+          je        biostty
+          cmp       ah, 0x09
+          je        tab
+          cmp       ah, 0x0A
+          je        newline
+          cmp       ah, 0x0D
+          je        biostty
+          mov       al, ah
+          mov       ah, 0x09
+          xor       bh, bh
+          mov       bl, [attr]
+          mov       cx, 1
+          int       0x10
+          call      getxy
+          cmp       dl, maxcol
+          jb        toreset2
+crlf:     test      byte [wrap], 0xFF
+          jz        toreset2
+          xor       dl, dl
+          call      putxy
+newline:  call      getxy
+          cmp       dl, maxrow
+          je        .2
+          inc       dl
+          call      putxy
+.1:       jmp short toreset2
+.2:       mov       ax, 0x0601          ; scroll 1 line
+          mov       bh, [attr]
+          xor       cx, cx
+          mov       dx, [maxcol]        ; pulls in maxrow also
+          push      bp                  ; BUG WORKAROUND
+          int       0x10
+          pop       bp
+          jmp short .1
+
+dirty:    db        0x00                ; Next digit continues previous byte
+pbufptr:  dw        0x0000
+chrbuf:   db        0x00
+mode:     db        0x00
+wrap:     db        0x01
+attr:     db        0x07
+coltab:   db        0, 4, 2, 6, 1, 5, 3, 7
+maxcol:   db        79                  ; Must be in this order
+maxrow:   db        24
+
+edos1:    db        "Incorrect DOS version", 13, 10, "$"
+pbuf      equ       $

@@ -1,0 +1,131 @@
+; In the United States, fonts are not copyrightable, though the vector data
+; used to generate them can be copyrighted (e.g., TTFs, OTFs).  In most other
+; countries, if there is a copyright on fonts or typefaces, they are generally
+; limited to 25 years or less.  The EGA.CPI font data dates back at least to
+; 1987 (release of PC DOS 3.3).
+; 
+; It is the belief of the author of egacpi.a86 that, sampling of the data from
+; Windows 95 in 2000 notwithstanding, no laws are being violated in the United
+; States of America or in most countries by including the EGA.CPI font
+; bitmap data in the necessary files.
+;
+; No copyright is claimed on the data produced by running this through NASM.
+;
+; With the above exception, the following copyright applies to this code:
+;
+; Copyright 2022 S. V. Nickolas.
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy 
+; of this software and associated documentation files (the "Software"), to 
+; deal with the Software without restriction, including without limitation the 
+; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
+; sell copies of the Software, and to permit persons to whom the Software is 
+; furnished to do so, subject to the following conditions:
+;
+;   1. Redistributions of source code must retain the above copyright notice, 
+;      this list of conditions and the following disclaimers.
+;   2. Redistributions in binary form must reproduce the above copyright 
+;      notice, this list of conditions and the following disclaimers in the 
+;      documentation and/or other materials provided with the distribution.
+;   3. The name of the author may not be used to endorse or promote products 
+;      derived from this Software without specific prior written permission.
+;
+; THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
+; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+;
+; IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+; SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+; PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+%macro    EGACPI    1
+          dw        0x001C              ; Length of header
+          dd        $+50+4096+3584+2048
+          dw        0x0001              ; Device type
+          db        "EGA     "          ; Device subtype
+          dw        %1                  ; Codepage
+          db        6 dup 0x00
+          dd        $+4                 ; Data offset
+          dw        0x0001              ; "is a cart"
+          dw        0x0003              ; Number of fonts
+          dw        18+4096+3584+2048   ; Block length
+%endmacro
+
+%macro    VGAHDR    0
+          db        16, 8, 0, 0
+          dw        256
+%endmacro
+
+%macro    EGAHDR    0
+          db        14, 8, 0, 0
+          dw        256
+%endmacro
+
+%macro    CGAHDR    0
+          db        8, 8, 0, 0
+          dw        256
+%endmacro
+
+
+filhdr:   db        0xFF, "FONT   "
+          db        8 dup 0x00
+          dw        0x0001              ; Number of pointers
+          db        0x01                ; Type of pointer
+          dd        $+4                 ; Pointer to info
+          dw        0x0006              ; Number of entries
+
+          EGACPI    437
+          VGAHDR
+          %include  "cp437vga.i86"
+          EGAHDR
+          %include  "cp437ega.i86"
+          CGAHDR
+          %include  "cp437cga.i86"
+
+          EGACPI    850
+          VGAHDR
+          %include  "cp850vga.i86"
+          EGAHDR
+          %include  "cp850ega.i86"
+          CGAHDR
+          %include  "cp850cga.i86"
+
+          EGACPI    852
+          VGAHDR
+          %include  "cp852vga.i86"
+          EGAHDR
+          %include  "cp852ega.i86"
+          CGAHDR
+          %include  "cp852cga.i86"
+
+          EGACPI    855
+          VGAHDR
+          %include  "cp855vga.i86"
+          EGAHDR
+          %include  "cp855ega.i86"
+          CGAHDR
+          %include  "cp855cga.i86"
+
+          EGACPI    860
+          VGAHDR
+          %include  "cp860vga.i86"
+          EGAHDR
+          %include  "cp860ega.i86"
+          CGAHDR
+          %include  "cp860cga.i86"
+
+          EGACPI    863
+          VGAHDR
+          %include  "cp863vga.i86"
+          EGAHDR
+          %include  "cp863ega.i86"
+          CGAHDR
+          %include  "cp863cga.i86"
+
+          db        13, 10
+          db        "Generated ", __UTC_DATE__, " ", __UTC_TIME__, "Z", 13, 10
+          db        0x1A

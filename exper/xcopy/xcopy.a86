@@ -1,0 +1,592 @@
+; Copyright 2022 S. V. Nickolas.
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy 
+; of this software and associated documentation files (the "Software"), to 
+; deal with the Software without restriction, including without limitation the 
+; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
+; sell copies of the Software, and to permit persons to whom the Software is 
+; furnished to do so, subject to the following conditions:
+;
+;   1. Redistributions of source code must retain the above copyright notice, 
+;      this list of conditions and the following disclaimers.
+;   2. Redistributions in binary form must reproduce the above copyright 
+;      notice, this list of conditions and the following disclaimers in the 
+;      documentation and/or other materials provided with the distribution.
+;   3. The name of the author may not be used to endorse or promote products 
+;      derived from this Software without specific prior written permission.
+;
+; THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
+; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+;
+; IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+; SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+; PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+; Return codes (according to PC DOS 7 documentation):
+;   0  All files were copied successfully.
+;   1  No files were found to copy.
+;   2  User break.
+;   4  Error occurred during initialization, e.g., a syntax error or a memory
+;      allocation error.
+;   5  Disk write error.
+;
+; Note: The /A and /M switches conflict, but the easiest resolution is to give
+;       /M priority over /A.
+;
+; Note: In our version the : separator after /D is optional.
+;
+; Note: Officially, /E requires /S, but in any versions I am aware of, if /E
+;       is specified without /S, /S is turned on automatically.
+
+          cpu       8086
+          org       0x0100
+
+; ============================================================================
+; Bitmask EQU for switches
+; ============================================================================
+
+A_FLAG    equ       0x01                ; Copy only files with ARCHIVE bit set
+                                        ;   and leave it set.
+D_FLAG    equ       0x02                ; Copy only files newer than a set
+                                        ;   date.
+E_FLAG    equ       0x04                ; Copy all subdirectories, even empty
+                                        ;   ones. (Implies /S)
+M_FLAG    equ       0x08                ; Copy only files with ARCHIVE bit set
+                                        ;   and then turn it off.
+P_FLAG    equ       0x10                ; Prompt for confirmation before
+                                        ;   copying each file.
+S_FLAG    equ       0x20                ; Recurse into subdirectories.
+V_FLAG    equ       0x40                ; Force verify flag on.
+W_FLAG    equ       0x80                ; Prompt before copying.
+
+; ============================================================================
+; Entry point from MS-DOS
+; ============================================================================
+
+entry:    mov       ah, 0x30            ; Make sure the poor sap isn't using
+          int       0x21                ; MS-DOS 1 and die screaming if he is.
+          xchg      ah, al
+          cmp       ax, 0x0200
+          jae       okdos
+          mov       dx, edos1
+          call      wrstr
+          int       0x20                ; DOS 1 EXIT
+
+; ============================================================================
+; Initialization
+; ============================================================================
+
+okdos:    mov       ah, 0x54            ; GETVFY
+          int       0x21
+          mov       [oldvfy], al        ; Save VERIFY flag to restore on exit.
+          xor       ah, ah              ; Place zero terminators on the input
+          mov       ah, fnbuf1          ; filename buffers.
+          mov       ah, fnbuf2
+          mov       si, 0x0081          ; Command line pointer, PSP:0081.
+          mov       di, fnbuf1          ; Target pointer.
+          call      killspc             ; Skip over whitespace.
+          cmp       byte [si], 0x0D     ; End of line?
+          jne       .1                  ; No, continue
+          mov       dx, enoargs         ; "Required parameter missing"
+          jmp       scream              ; Die screaming
+.1:       cmp       si, 0x0100          ; End of buffer?
+          je        .19                 ; Yeah, we're outtie.
+          mov       ah, [si]            ; Get next char
+          call      smash               ; Upcase it
+          cmp       ah, 0x0D            ; End of line?
+          je        .19                 ; Yeah, we're outtie.
+          cmp       ah, '/'             ; Switch?
+          je        .7                  ; Process it.
+          cmp       ah, ' '             ; Whitespace - switch our target pointer.
+          je        .2
+          cmp       ah, 0x09
+          jne       .5
+.2:       cmp       di, fnbuf2          ; Already on argument 2?
+          jae       .3                  ; Yes, mark refuse further parameters
+          mov       byte [di], 0        ; No, so add NUL terminator here
+          mov       di, fnbuf2          ; and go to argument 2.
+          jmp short .4
+.3:       xor       di, di              ; Mark refuse further parameters.
+.4:       call      killspc             ; Jump over whitespace and keep going.
+          jmp short .1
+.5:       or        di, di              ; Refuse further parameters?
+          jnz       .6                  ; Not set, so we're OK.
+          mov       dx, eargs           ; "Too many parameters"
+          jmp       scream              ; Die screaming
+.6:       mov       [di], ah            ; Copy next char.
+          inc       si                  ; Notch up our pointers.
+          inc       di
+          jmp short .1                  ; Keep going.
+
+; ----------------------------------------------------------------------------
+; Switch parser
+; ----------------------------------------------------------------------------
+
+; Switches are in the format /X or /X[:]arg, but unlike Unix where multiple
+; switches only need a single flag, a flag is required for every switch.
+;
+; Only the /D switch takes an argument.
+;
+; If the appropriate compiler switch is supplied, we have command-line help if
+; the /? switch is used; this is handled separately since it is instant death.
+
+.7:       inc       si                  ; Jump over the /.
+          mov       di, switches
+          mov       ah, [si]            ; Get our switch.
+          inc       si
+          call      smash               ; Smash case.
+          xor       bx, bx              ; Counter in BX (because we can add)
+          cmp       ah, 0x0D            ; EOL?
+          je        .12                 ; Yes, scream
+%ifdef HELP
+          cmp       ah, '?'
+          jne       .8
+          mov       dx, ehelp
+          jmp       scream
+%endif
+.8:       mov       al, [di+bx]         ; Next switch to check
+          or        al, al              ; End of list?
+          jz        .9                  ; Yes, so no match - die screaming
+          cmp       ah, al              ; Match?
+          je        .10                 ; Yes, skip forward.
+          inc       bx                  ; No, notch up and keep checking.
+          jmp short .8
+.9:       mov       [xswitch], ah       ; Fill in the "Invalid switch" error
+          mov       dx, eswitch         ; Point to it
+          jmp       scream              ; Die screaming
+.10:      mov       cl, bl              ; To do a multibit shift
+          mov       ah, 0x01
+          clc
+          shl       ah, cl
+          or        [mode], ah          ; Add it to what we found
+          cmp       ah, D_FLAG          ; Was it /D?
+          je        .14                 ; Yes, set aside for special handling
+.11:      mov       ah, [si]            ; Check for another switch?
+          cmp       ah, '/'
+          je        .8                  ; Go back, Jack, and do it again.
+          cmp       ah, ' '             ; So check for whitespace
+          je        .13
+          cmp       ah, 0x09
+          je        .13
+.12:      mov       dx, earg            ; Didn't find it, so die screaming.
+          jmp       scream
+.13:      call      killspc
+          jmp       .1
+
+; Special handling for /D argument.
+
+.14:      inc       si                  ; Next char.
+          cmp       byte [si], ':'      ; Optional :
+          jne       .15
+          inc       si                  ; Skip over it.
+.15:      mov       dx, i18ntank        ; Place it at the end of code for now
+          mov       ax, 0x3800          ; GETI18N
+          int       0x21
+          jc        .17                 ; Assume MDY if the call failed.
+          cmp       byte [tail], 1
+          jb        .17                 ; 0 - MDY
+          je        .16                 ; 1 - DMY
+          call      getyear             ; 2 - YMD
+          call      getsep
+          call      getmonth
+          call      getsep
+          call      getday
+          jmp short .18
+.16:      call      getday
+          call      getsep
+          call      getmonth
+          call      getsep              ; "Premature optimization is the root
+          call      getyear             ;  of all evil" - attr. to Don Knuth
+          jmp short .18
+.17:      call      getmonth
+          call      getsep
+          call      getday
+          call      getsep
+          call      getyear
+.18:      call      mosan               ; Sanity check day of month
+          mov       [compdate], dx      ; Save it
+          inc       si
+          jmp short .11                 ; Proceed as with other switches
+
+; ----------------------------------------------------------------------------
+; Last checks before main routine
+; ----------------------------------------------------------------------------
+
+; Sanitize our input.
+
+.19:      mov       ah, [fnbuf2]        ; If no "destination", make it "."
+          jne       .20
+          mov       word [fnbuf2], '.'  ; The "word" adds the NUL terminator.
+
+.20:      test      byte [mode], E_FLAG ; /E implies /S
+          jz        .21
+          or        byte [mode], S_FLAG
+
+; Perform final initialization tasks.
+
+.21:      mov       ax, 0x2523          ; Set up our Ctrl-Break handler.
+          mov       dx, newbrk
+          int       0x21
+          mov       ax, 0x3524          ; Get the original critical error
+          int       0x21                ;   handler (because we modify it).
+          mov       [oldcrit], bx
+          mov       [oldcrit+2], es
+          push      cs
+          pop       es
+          mov       ax, 0x2524          ; Install our own.
+          mov       dx, newcrit
+          int       0x21
+
+; If the user asked us to turn VERIFY ON, oblige.
+          
+          test      byte [mode], V_FLAG ; /V specified?
+          jz        .22                 ; No, skip
+          mov       ax, 0x2E01          ; SETVFY(1)
+          xor       dl, dl              ; Needed on MS-DOS 2
+          int       0x21
+
+; And now that it's all taken care of, if the user wants us to wait (to swap
+; source disks, most likely), oblige.
+
+.22:      test      byte [mode], W_FLAG ; /W specified?
+          jz        .23                 ; No, skip
+          mov       dx, ewait           ; "Press any key to begin copying..."
+          call      wrstr
+          mov       ah, 0x08            ; GETCH
+          int       0x21
+          mov       dx, mcrlf
+          call      wrstr
+.23: jmp die
+
+; ============================================================================
+; Subroutines
+; ============================================================================
+
+; ----------------------------------------------------------------------------
+; Bones of the date parsing code.
+; ----------------------------------------------------------------------------
+
+; See the end of the switch parser above for how this works more generally 
+; (esp. how it knows what date order to use), but call each of these functions
+; in the appropriate order, and getsep in between them, and then you'll have a
+; valid MS-DOS datestamp in DX.
+;
+; The "mosan" function performs further sanitization on the day of the month.
+
+getyear:  call      getnum
+          mov       bx, [inword]
+          cmp       bx, 1900            ; This code is Y2K-friendly.
+          jb        .1
+          sub       bx, 1900
+.1:       or        bh, bh              ; Our range fits in a byte, so if
+          jnz       baddate             ; input exceeds that, die screaming.
+          cmp       bl, 80              ; < 1980 = die screaming
+          jb        baddate
+          cmp       bl, 199             ; > 2099 = die screaming
+          ja        baddate
+          sub       bl, 80
+          mov       dh, bl
+          ret
+
+getmonth: call      getnum
+          mov       bh, [inword]
+          or        bh, bh              ; > 255 = invalid
+          jz        baddate
+          or        bl, bl              ; 0 = invalid
+          jz        baddate
+          cmp       bl, 12              ; Only 12 months in a year
+          ja        baddate
+          mov       cl, 5               ; Combine with day into one byte
+          shl       bl, cl
+          and       dl, 0xE0
+          or        dl, bl
+          ret
+
+getday:   call      getnum
+          mov       bx, [inword]
+          or        bh, bh              ; > 255 = invalid
+          jnz       baddate
+          or        bl, bl              ; 0 = invalid
+          jz        baddate
+          cmp       bl, 31              ; No month has more than 31 days.
+          ja        baddate
+          and       dl, 0x1F            ; Combine with month into one byte
+          or        dl, bl
+          ret
+
+getnum:   mov       word [inword], 0
+.1:       mov       ah, [si]            ; Read digits.
+          cmp       ah, '0'             ; If not a digit, we're done
+          jb        .2
+          cmp       ah, '9'
+          ja        .2
+          and       ah, 0x0F            ; Mask off the ASCII
+          mov       bl, ah              ; Multiply existing value by 10 and
+          xor       bh, bh              ;   add our digit to it.
+          mov       ax, 10
+          mul       word [inword]
+          add       ax, bx
+          mov       [inword], ax
+          inc       si                  ; Next char
+          jmp short .1
+.2:       ret
+
+; If next character is "/", "-" or ".", skip it.  Otherwise, die screaming.
+
+getsep:   mov       ah, [si]
+          cmp       ah, '/'
+          je        .1
+          cmp       ah, '-'
+          je        .1
+          cmp       ah, '.'
+          jne       baddate
+.1:       inc       si
+          ret
+
+; We cannot do the day-of-month sanity check until we know the month, because
+; months do not all have the same length, or the year, because every 4 years
+; (it's not this simple but within MS-DOS's range of accepted years it's close
+; enough) February is intercalated.
+
+mosan:    mov       ah, dl              ; Day of month sanity check
+          mov       al, dl              ; (a.k.a. "30 days hath September...")
+          mov       cl, 5
+          shr       ah, cl
+          and       al, 0x1F
+          cmp       ah, 2               ; February
+          jne       .2
+          mov       bl, 28
+          test      dh, 0x04            ; Oversimplification, but true during
+          jnz       .1                  ; our valid year range (1980-2099)
+          inc       bl
+.1:       cmp       al, bl
+          ja        baddate
+          ret
+.2:       mov       bl, 30
+          cmp       al, 4               ; April
+          je        .1
+          cmp       al, 6               ; June
+          je        .1
+          cmp       al, 9               ; September
+          je        .1
+          cmp       al, 11              ; November
+          je        .1
+          inc       bl
+          jmp short .1
+
+; Error exit for all date-related functions.
+
+baddate:  mov       dx, edate           ; "Invalid date"
+          jmp       scream
+
+; ----------------------------------------------------------------------------
+; Functions used for interpreting the command line.
+; ----------------------------------------------------------------------------
+
+; Upcase AH.  This is about as simple as the code can get.
+
+smash:    cmp       ah, 'a'
+          jb        .1
+          cmp       ah, 'z'
+          ja        .1
+          and       ah, 0x5F
+.1:       ret
+
+; Increase SI while it points to a space or tab and is within the command line
+; memory space (0081..00FF).
+
+killspc:  cmp       byte [si], ' '
+          je        .1
+          cmp       byte [si], 0x09
+          jne       .2
+.1:       inc       si
+          cmp       si, 0x0100
+          jb        killspc
+.2:       ret
+
+; ----------------------------------------------------------------------------
+; Output functions.
+; ----------------------------------------------------------------------------
+
+; Write number in decimal format.
+;
+; The "wrstrc" function to output a C string is only used by wrnum, but as
+; that function does need it, it is here included.
+;
+; Input: AX=number to output.
+
+wrnum:    mov       byte [numbuf+6], 0  ; Recycle the end of linbuf2.
+          mov       di, numbuf+5        ; (Only does an unsigned word.
+.1:       xor       dx, dx              ;  Output will be a C string.)
+          mov       bx, 10              ; DECIMAL
+          div       bx                  ; AX=(DX:AX)/BX; DX=(DX:AX)%BX
+          add       dl, '0'             ; Convert remainder to ASCII
+          mov       [di], dl            ; Write it into buffer
+          dec       di                  ; Step down
+          or        ax, ax              ; Anything left?
+          jnz       .1                  ; Yes, so keep going.
+          mov       dx, di
+          inc       dx                  ; FALL INTO
+wrstrc:   push      di
+          mov       di, dx
+.1:       mov       ah, 0x02            ; PUTCHAR
+          mov       dl, [di]
+          or        dl, dl              ; Null terminator?
+          jz        .2                  ; Yes, restore di and exit
+          int       0x21
+          inc       di
+          jmp short .1
+.2:       pop       di
+          ret
+
+; Write string through DOS function 9; a simple space optimization since it is
+; used so frequently.
+;
+; Input: DX=string, terminated by $
+
+wrstr:    mov       ah, 0x09            ; PUTSTR
+          int       0x21
+          ret
+
+; ----------------------------------------------------------------------------
+; INT 23 and 24 handlers.
+; ----------------------------------------------------------------------------
+
+; These interrupt handlers should be near the main exit code.  INT23 and 24
+; are intercepted, so that when we are killed by Ctrl-Break or "Abort" in the
+; critical error handler, we can set our exit code appropriately and die
+; cleanly.
+
+; Ctrl-Break handler.  Return error code 2.
+
+newbrk:   mov       byte [cs:exitcode], 2
+          jmp short die
+
+; Critical error handler.  If user chooses Abort, then clean up and exit with
+; error code 5.
+
+newcrit:  pushf
+          call far  [cs:oldcrit]        ; Chain into old handler.
+          cmp       al, 2               ; Abort?
+          jne       .1                  ; No, just clean up and return.
+          mov       byte [cs:exitcode], 5
+          jmp short die
+.1:       iret
+
+; ----------------------------------------------------------------------------
+; End-of-program routines.
+; ----------------------------------------------------------------------------
+
+scream:   call      wrstr
+die:      cmp       byte [exitcode], 4  ; If errorlevel is 4, no summary.
+          je        .1
+          mov       ah, 0x02            ; PUTCHAR
+          mov       dl, 0x09            ; Tab
+          int       0x21
+          mov       ax, [tally]
+          call      wrnum
+          mov       dx, mfiles
+          call      wrstr
+.1:       mov       ah, 0x2E            ; Restore VERIFY flag
+          mov       al, [oldvfy]
+          xor       dl, dl              ; Needed on MS-DOS 2
+          int       0x21
+          mov       ah, 0x4C
+          mov       al, [exitcode]
+          int       0x21                ; EXIT CODE exitcode
+
+; ============================================================================
+; Do not optimize these variables into BSS.
+; ============================================================================
+
+mode:     db        0x00
+oldvfy:   db        0x00
+inword:   dw        0x0000
+compdate: dw        0x0000
+tally:    dw        0x0000
+
+oldcrit:  dd        0x00000000          ; Old INT24 handler.
+
+numbuf:   db        6 dup 0x00
+
+exitcode: db        0x04                ; Initial value should be 4
+
+; ============================================================================
+; "/?" help message (only shown if compiled in)
+; ============================================================================
+
+%ifdef HELP
+ehelp:    db        "Copies files (except hidden and system files) and directory trees.", 13, 10, 13, 10
+          db        "XCOPY source [destination] [/A | /M] [/D:date] [/P] [/S [/E]] [/V] [/W]", 13, 10, 13, 10
+          db        "  source       Specifies the file(s) to copy.", 13, 10
+          db        "  destination  Specifies the location and/or name of new files.", 13, 10
+          db        "  /A           Copies files with the archive attribute set,", 13, 10
+          db        "               and does not change the attribute.", 13, 10
+          db        "  /M           Copies files with the archive attribute set,", 13, 10
+          db        "               and turns off the archive attribute.", 13, 10
+          db        "  /D:date      Copies files changed on or after the specified date.", 13, 10
+          db        "  /P           Prompts user before creating each destination file.", 13, 10
+          db        "  /S           Copies directories and subdirectories, except empty ones.", 13, 10
+          db        "  /E           Copies any subdirectories, even if empty.", 13, 10
+          db        "  /V           Verifies each new file.", 13, 10
+          db        "  /W           Prompts user to press a key before copying.", 13, 10, "$"
+%endif
+
+; ============================================================================
+; Message strings (errors first)
+; ============================================================================
+
+edos1:    db        "Incorrect DOS version", 13, 10, "$"
+edrive:   db        "Invalid drive specification", 13, 10, "$"
+eram:     db        "Insufficient memory", 13, 10, "$"
+epath:    db        "Invalid path", 13, 10, "$"
+enoargs:  db        "Required parameter missing", 13, 10, "$"
+eargs:    db        "Too many parameters", 13, 10, "$"
+eswitch:  db        "Invalid switch - /"
+xswitch:  db        0
+mcrlf:    db        13, 10, "$"
+earg:     db        "Invalid parameter", 13, 10, "$"
+edate:    db        "Invalid date", 13, 10, "$"
+enofiles: db        "File not found", 13, 10, "$"
+ecyclic:  db        "Cannot perform a cyclic copy", 13, 10, "$"
+eself:    db        "File cannot be copied onto itself", 13, 10, "$"
+ehandles: db        "Too many open files", 13, 10, "$"
+ecreat:   db        "File creation error", 13, 10, "$"
+eeffed:   db        "Memory structure trashed", 13, 10, "$"
+emkdir:   db        "Unable to create directory", 13, 10, "$"
+eaccess:  db        "Access denied", 13, 10, "$"
+efromdev: db        "Cannot XCOPY from a reserved device", 13, 10, "$"
+etodev:   db        "Cannot XCOPY to a reserved device", 13, 10, "$"
+ewait:    db        "Press any key to begin copying file(s)...", 13, 10, "$"
+mreading: db        "Reading source file(s)...", 13, 10, "$"
+myn:      db        " (Y/N)? $"
+
+mfiles:   db        " file(s) copied", 13, 10, "$"
+
+; ============================================================================
+; Additional data
+; ============================================================================
+
+switches: db        "ADEMPSVW", 0
+
+; ============================================================================
+; BSS
+; ============================================================================
+
+tail:
+
+fnbuf1    equ       tail
+fnbuf2    equ       tail+128
+ffblk     equ       fnbuf2+128
+i18ntank  equ       ffblk
+
+bottom    equ       ffblk+48
+
+; Ugly code for assuring some stuff is aligned on paragraph boundaries.
+
+eof       equ       bottom+16-((bottom-entry)&15)
