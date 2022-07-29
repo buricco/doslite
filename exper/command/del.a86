@@ -1,0 +1,256 @@
+; Copyright 2022 S. V. Nickolas.
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy 
+; of this software and associated documentation files (the "Software"), to 
+; deal in the Software without restriction, including without limitation the 
+; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
+; sell copies of the Software, and to permit persons to whom the Software is 
+; furnished to do so.
+;
+; THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
+; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+
+; This code is UNTESTED.
+;
+; It implements the DEL command as implemented in PC DOS 4 and later.
+
+          cpu       8086
+          org       0x0100
+entry:    mov       ah, 0x30            ; GETVER
+          int       0x21
+          xchg      ah, al
+          cmp       ax, 0x0200
+          jae       okdos
+          mov       dx, edos1
+          call      wrstr
+          int       0x20                ; DOS 1 EXIT
+
+okdos:    mov       byte [eraq], 0      ; Set defaults
+          mov       byte [eargflag], 0
+          mov       si, 0x0081          ; Command line buffer
+          mov       di, buf1
+          call      killspc
+          cmp       byte [si], 0x0D     ; Blank command line
+          jne       .1
+          mov       dx, enoargs         ; "Required parameter missing"
+          jmp       scream
+.1:       mov       ah, [si]
+          cmp       ah, '/'             ; Switch?
+          jne       .3                  ; No, skip
+          mov       ah, [si+1]
+          call      smash               ; Force uppercase
+          cmp       ah, 'P'
+          jne       .2
+          mov       [xswitch], ah       ; Set up message
+          mov       dx, eswitch         ; "Invalid switch"
+          jmp       scream
+.2:       mov       byte [eraq], 0xFF   ; Set prompt flag
+          add       si, 2               ; Skip over it
+          call      killspc
+          cmp       di, buf1            ; Was there anything typed?
+          je        .1
+          mov       byte [eargflag], 0xFF
+          jmp short .1
+.3:       mov       ah, [si]
+          cmp       ah, ' '             ; End of parameter
+          je        .5
+          cmp       ah, 0x09
+          je        .5
+          cmp       ah, 0x0D            ; End of line
+          je        .6
+          cmp       byte [eargflag], 0xFF
+          jne       .4                  ; OK to copy char
+          mov       dx, eargs           ; "Too many arguments"
+          jmp       scream
+.4:       call      smash               ; Force uppercase
+          mov       [di], ah            ; Store
+          inc       si                  ; Adjust pointers
+          inc       di
+          cmp       si, 0x0100          ; End of buffer
+          jne       .1
+          jmp short .6
+.5:       call      killspc             ; Mark we have a parameter alreaady
+          mov       byte [eargflag], 0xFF
+          jmp short .1
+.6:       mov       byte [di], 0        ; Add a NUL terminator
+          inc       di
+          mov       si, buf1
+.7:       cmp       byte [si], 0        ; Get basename
+          je        .8
+          inc       si
+          jmp short .7
+.8:       dec       si
+          cmp       byte [si], ':'      ; Drive separator?
+          je        .9                  ; Yes, done
+          cmp       byte [si], '\'      ; Path separator?
+          je        .9                  ; Yes, done
+          cmp       si, buf1            ; Beginning of buffer?
+          jne       .8                  ; No, keep going
+          dec       si
+.9:       inc       si
+          mov       ax, 0x2900          ; Stuff basename into an FCB
+          mov       di, buf2
+          int       0x21
+          mov       si, buf2+1          ; Did it come out as "???????????" ?
+          mov       cl, 11
+.10:      cmp       byte [si], '?'
+          jne       .11                 ; Nope
+          inc       si
+          dec       cl
+          jne       .10
+          cmp       byte [eraq], 0      ; Was /P set?
+          je        .12                 ; Yes, so skip
+.11:      mov       dx, estar           ; "Are you sure (Y/N)?"
+          call      wrstr
+          mov       ah, 0x01            ; GETCHE
+          int       0x21
+          mov       ah, al              ; Force uppercase
+          call      smash
+          mov       dx, ecrlf
+          call      wrstr
+          cmp       ah, 'Y'             ; Yes?
+          je        .12
+          cmp       ah, 'N'             ; No?
+          jne       .11
+          jmp       die
+.12:      mov       byte [buf2], 0
+          mov       si, buf1            ; Do dirname
+.13:      cmp       byte [si], 0
+          je        .14
+          inc       si
+          jmp short .13
+.14:      dec       si
+          cmp       byte [si], ':'
+          je        .15
+          cmp       byte [si], '\'
+          je        .15
+          cmp       si, buf1
+          jne       .17
+.15:      mov       bx, si              ; Copy dirname
+          inc       bx
+          mov       si, buf1
+          mov       di, buf2
+.16:      mov       ah, [si]
+          mov       [di], ah
+          inc       si
+          inc       di
+          cmp       si, bx              ; Until we hit our mark
+          jne       .16
+          mov       byte [di], 0        ; Add NUL terminator
+.17:      mov       dx, buf3            ; set buffer for FINDFIRST
+          mov       ah, 0x1A
+          int       0x21
+          mov       ah, 0x4E            ; FINDFIRST
+          xor       cx, cx
+          mov       dx, buf1
+          int       0x21
+          jnc       .20                 ; We gotcha!
+          cmp       al, 0x12            ; No files found
+          je        .19
+.18:      mov       dx, epath           ; "Invalid path"
+          jmp       scream
+.19:      mov       dx, e404            ; "File not found"
+          jmp       scream
+.20:      mov       si, buf2            ; strcpy(buf4, buf2);
+          mov       di, buf4
+.21:      mov       ah, [si]
+          mov       [di], ah
+          or        ah, ah
+          jz        .22
+          inc       si
+          inc       di
+          jmp short .21
+.22:      mov       si, buf3+0x1E       ; strcat(buf4, buf3+0x1E);
+.23:      mov       ah, [si]
+          mov       [di], ah
+          or        ah, ah
+          jz        .24
+          inc       si
+          inc       di
+          jmp short .23
+.24:      cmp       byte [eraq], 0x00   ; Skip if /P not set
+          je        .28
+.25:      mov       dx, buf4            ; Output filename
+          call      wrstrc
+          mov       dx, eok             ; "Delete (Y/N)?"
+          call      wrstr
+.26:      mov       ah, 0x01            ; GETCHE
+          int       0x21
+          mov       ah, al              ; Force uppercase
+          call      smash
+          mov       dx, ecrlf
+          call      wrstr
+          cmp       ah, 'Y'             ; Yes?
+          je        .28                 ; Yes, go ahead
+          cmp       ah, 'N'             ; No?
+          jne       .25                 ; No, ask again
+.27:      mov       ah, 0x4F            ; FINDNEXT
+          int       0x21
+          jnc       .20                 ; Go back, Jack, and do it again
+          cmp       al, 0x12            ; No more files
+          jne       .29
+          mov       ax, 0x4C00
+          int       0x21                ; EXIT CODE 0
+.28:      mov       dx, buf4            ; Zap
+          mov       ah, 0x41            ; UNLINK
+          int       0x21
+          jnc       .27                 ; Success
+.29:      cmp       al, 0x02
+          je        .19
+          cmp       al, 0x03
+          je        .18
+          mov       dx, e9001           ; FALL INTO
+scream:   call      wrstr
+die:      mov       ax, 0x4C01
+          int       0x21                ; EXIT CODE 1
+
+wrstr:    mov       ah, 0x09
+          int       0x21
+          ret
+
+wrstrc:   push      di
+          mov       di, dx
+.1:       mov       ah, 0x02            ; PUTCHAR
+          mov       dl, [di]
+          or        dl, dl              ; Null terminator?
+          jz        .2                  ; Yes, restore di and exit
+          int       0x21
+          inc       di
+          jmp short .1
+.2:       pop       di
+          ret
+
+smash:    cmp       ah, 'a'
+          jb        .1
+          cmp       ah, 'z'
+          ja        .1
+          and       ah, 0x5F
+.1:       ret
+
+killspc:  cmp       byte [si], ' '
+          je        .1
+          cmp       byte [si], 0x09
+          jne       .2
+.1:       inc       si
+          cmp       si, 0x0100
+          jb        killspc
+.2:       ret
+
+edos1:    db        "Incorrect DOS version", 13, 10, "$"
+enoargs:  db        "Required parameter missing", 13, 10, "$"
+eargs:    db        "Too many parameters", 13, 10, "$"
+eswitch:  db        "Invalid switch - /"
+xswitch:  db        0
+ecrlf:    db        13, 10, "$"
+e404:     db        "File not found", 13, 10, "$"
+epath:    db        "Invalid path", 13, 10, "$"
+e9001:    db        "Access denied", 13, 10, "$"
+eok:      db        ": delete (Y/N)? $"
+estar:    db        "Are you sure (Y/N)? $"
+eraq:     db        0x00
+eargflag: db        0x00
+buf1      equ       $
+buf2      equ       $+64
+buf3      equ       $+128
+buf4      equ       $+192
