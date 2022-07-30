@@ -31,7 +31,6 @@
 ; DIR
 ; ECHO              Complete*
 ;   *The ON and OFF features are specific to batch files and are not supported
-; FOR
 ; LH, LOADHIGH
 ; MD, MKDIR         Complete
 ; PAUSE             Complete
@@ -48,10 +47,12 @@
 ;   *Spurious detection of VSNs, this problem is shared with LABEL
 ;
 ; A list of commands that would really need to be implemented into COMMAND.COM
-; proper once the framework is build for it:
+; proper once the framework is built for it:
 ;
 ; CALL              (modifies the batch state machine)
 ; EXIT              (exit from what?)
+; FOR               (relies heavily on the internal COMMAND.COM infrastructure
+;                    which isn't finished yet)
 ; GOTO              (modifies the batch state machine)
 ; IF                (needs access to errorlevels)
 ; PATH              (modifies the environment)
@@ -60,6 +61,34 @@
 ; SHIFT             (modifies the batch state machine)
 ;
 ; Error checking is spotty.
+;
+; ============================================================================
+;
+; Thoughts on implementing the other internal commands...
+;
+; COPY's built-in concatenation feature, plus the sensitivity of location for 
+; the /A and /B switches, makes it a right pain to implement in ASM.  I could 
+; probably just use the MS-DOS 2.11 implementation.
+;
+; DIR, until MS-DOS 5, only had two switches - /P and /W.  That's easy enough.
+; Adding /B and /L, that's not too hard.  /A, that's a little more painful as 
+; I would need to write a parser for it.  /O, that's a lot more painful since 
+; not only does it need a parser, it needs a sort engine, and that will bloat 
+; up the code quite a bit (although the exchange sort algo I use is actually 
+; pretty code-efficient if slower than mud).  (DR DOS uses a completely 
+; different set of switches, except for the abovementioned /P and /W.)  Maybe
+; I could do what I did with RMFCOM - implement the simple switches but leave
+; the more complicated /A, /O and /S completely out.
+;
+; LOADHIGH, I have no idea in hell how to implement this.
+;
+; REN, I have the original RMFCOM implementation which uses FCBs, but it might 
+; be better to use a hybrid FCB/Xenix method, similar to what I did with COMP, 
+; which like REN can take wildcards in both the source and target filespecs.
+;
+; As for any other commands, they are tied too deep into the internal state of 
+; COMMAND.COM to worry about until more of the scaffolding is set up (e.g., 
+; the half-written INT24 handler)...
 
           cpu       8086
           org       0x0100
@@ -200,6 +229,26 @@ getlin:   mov       word [linbuf], 0x0080
           mov       dx, linbuf
           int       0x21
           mov       dx, ecrlf
+          call      wrstr
+          mov       ah, [linbuf+1]
+          ret
+
+; Read a line from the keyboard using DOSKEY, if available, and fall back to
+; plain MS-DOS API if not.  Not hooked up to anything yet.
+
+xgetlin:  mov       word [linbuf], 0x0080
+          mov       ax, 0x4800          ; Is DOSKEY installed?
+          int       0x2F
+          mov       dx, linbuf          ; Set up the pointer either way
+          or        al, al              ; 0=not installed
+          jz        .1                  ; Not installed; use DOS GETLIN
+          mov       ax, 0x4810          ; Installed; use DOSKEY GETLIN
+          int       0x2F
+          or        ax, ax              ; 0=no error
+          jz        .2                  ; ...so if there WAS an error,
+.1:       mov       ah, 0x0A            ;   fall back on the MS-DOS API.
+          int       0x21
+.2:       mov       dx, ecrlf
           call      wrstr
           mov       ah, [linbuf+1]
           ret
