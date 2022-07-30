@@ -23,7 +23,7 @@
 ; CHCP              Complete
 ; CLS               Complete
 ; COPY
-; CTTY
+; CTTY              Implemented but not working
 ; DATE              Needs debugging
 ;   Supports the /T switch from Windows NT
 ; DEL, ERASE        Complete*
@@ -42,11 +42,22 @@
 ;   Supports the /T switch from Windows NT
 ; TRUENAME          Complete
 ; TYPE              Complete
-; VER               Complete*
-;   *Does not support the /R switch from MS-DOS/PC DOS 5+
+; VER               Complete
 ; VERIFY            Complete
 ; VOL               Complete*
 ;   *Spurious detection of VSNs, this problem is shared with LABEL
+;
+; A list of commands that would really need to be implemented into COMMAND.COM
+; proper once the framework is build for it:
+;
+; CALL              (modifies the batch state machine)
+; EXIT              (exit from what?)
+; GOTO              (modifies the batch state machine)
+; IF                (needs access to errorlevels)
+; PATH              (modifies the environment)
+; PROMPT            (modifies the environment)
+; SET               (modifies the environment)
+; SHIFT             (modifies the batch state machine)
 ;
 ; Error checking is spotty.
 
@@ -96,6 +107,7 @@ eargs:    db        "Too many parameters", 13, 10, "$"
 earg:     db        "Invalid parameter", 13, 10, "$"
 ecmd:     db        "Invalid command", 13, 10, "$"
 efunc:    db        "Invalid function", 13, 10, "$"
+edev:     db        "Invalid device", 13, 10, "$"
 e404:     db        "File not found", 13, 10, "$"
 epath:    db        "Invalid path", 13, 10, "$"
 e9001:    db        "Access denied", 13, 10, "$"
@@ -104,11 +116,10 @@ eactive:  db        "Active code page: $"
 ecpset:   db        "Cannot set code page", 13, 10, "$"
 ecpget:   db        "Cannot retrieve code page", 13, 10, "$"
 emkdir:   db        "Cannot create directory", 13, 10, "$"
-echdir:   db        "Cannot set directory", 13, 10, "$"
 ermdir:   db        "Cannot remove directory", 13, 10, "$"
 edelok:   db        ": delete (Y/N)? $"
 eall:     db        "Are you sure (Y/N)? $"
-epwd:     db        "Current drive is no longer valid", 13, 10, "$"
+epwd:     db        "Current drive is no longer valid$"
 ecurdate: db        "Current date is $"
 ecurtime: db        "Current time is $"
 enewdate: db        "Enter new date $"
@@ -122,6 +133,10 @@ edr:      db        "DR DOS emulating " ; FALL INTO
 eibm:     db        "PC $"
 ems:      db        "MS-$"
 edosver:  db        "DOS Version $"
+erev:     db        "Revision $"
+edosisin: db        13, 10, "DOS is in $"
+elodos:   db        "low memory", 13, 10, "$"
+ehidos:   db        "HMA", 13, 10, "$"
 ebreak:   db        "BREAK is $"
 everify:  db        "VERIFY"            ; FALL INTO
 mlabel:   db        " is $"
@@ -151,8 +166,10 @@ osmajor:  db        0x00
 ffblk:    times 128 db 0x00
 fin       equ       ffblk+0x001E
 drvchk:   db        0x00
+verr:                                   ; SAME AS
 eraq:     db        0x00
 eargflag: db        0x00
+arifflag: db        0x00
 cmdname:  db        9 dup 0x00
 tank:     dw        0x0000
 inword:   dw        0x0000
@@ -223,22 +240,6 @@ wrstrc:   push      di
           jmp short .1
 .2:       pop       di
           ret
-getmsg24: mov       cx, di              ; If DI.L=error number, print error
-          xor       ch, ch
-          mov       si, crittab
-.1:       cmp       ch, cl
-          je        .5
-.2:       cmp       byte [si], 0
-          je        .5
-.3:       cmp       byte [si], '$'
-          je        .4
-          inc       si
-          jmp short .3
-.4:       inc       ch
-          jmp short .1
-.5:       inc       si
-.6:       mov       dx, si
-          jmp short wrstr
 
 wrwrd:    mov       [tank+1], al
           call      wrbyt
@@ -259,7 +260,7 @@ hexit:    and       ah, 0x0F            ; Convert nibble to ASCII
           int       0x21
           ret
 
-; SKELETON
+; SKELETON.  Not hooked up to anything.
 
 new24:    push      bx
           push      cx
@@ -280,6 +281,81 @@ new24:    push      bx
           pop       cx
           pop       bx
           iret 
+
+; Not hooked up to anything.
+
+getmsg24: mov       cx, di              ; If DI.L=error number, print error
+          xor       ch, ch
+          mov       si, crittab
+.1:       cmp       ch, cl
+          je        .5
+.2:       cmp       byte [si], 0
+          je        .5
+.3:       cmp       byte [si], '$'
+          je        .4
+          inc       si
+          jmp short .3
+.4:       inc       ch
+          jmp short .1
+.5:       inc       si
+.6:       mov       dx, si
+          jmp       wrstr
+
+; Not hooked up to anything.
+
+arif:     mov       dx, eabort
+          call      wrstr
+          test      byte [arifflag], 0x10
+          jz        .1
+          mov       dx, ecomma
+          call      wrstr
+          mov       dx, eretry
+          call      wrstr
+.1:       test      byte [arifflag], 0x20
+          jz        .2
+          mov       dx, ecomma
+          call      wrstr
+          mov       dx, eignore
+          call      wrstr
+.2:       test      byte [arifflag], 0x08
+          jz        .1
+          mov       dx, ecomma
+          call      wrstr
+          mov       dx, efail
+          call      wrstr
+.3:       mov       dx, eqmark
+          call      wrstr
+.4:       mov       ah, 0x01
+          int       0x21
+          push      ax
+          mov       dx, ecrlf
+          call      wrstr
+          pop       ax
+          mov       ah, al
+          call      smash
+          cmp       ah, 'A'
+          je        .8
+          test      byte [arif], 0x10
+          jz        .5
+          cmp       ah, 'R'
+          je        .9
+.5:       test      byte [arif], 0x20
+          jz        .6
+          cmp       ah, 'I'
+          je        .10
+.6:       test      byte [arif], 0x08
+          jz        .7
+          cmp       ah, 'F'
+          je        .11
+.7:       jmp       arif
+.8:       mov       al, 0x02
+          jmp short .12
+.9:       mov       al, 0x01
+          jmp short .12
+.10:      xor       al, al
+          jmp short .12
+.11:      mov       al, 0x03
+.12:      ret
 
 init:     mov       ax, 0x3524
           int       0x21
@@ -728,9 +804,11 @@ c_cd:     cmp       byte [buf], 0       ; Null - get CWD on current drive
           mov       ah, 0x3B
           int       0x21
           jnc       mcrdend
-          mov       dx, echdir
+          mov       dx, epath
           jmp       scream
 .4:       mov       dx, epwd
+          call      wrstr
+          mov       dx, ecrlf
           jmp       scream
 
 c_rd:     call      argsan
@@ -954,27 +1032,52 @@ c_pause:  mov       dx, epause
           call      wrstr
           jmp short c_rem
 
-c_ver:    stc
+c_ver:    mov       byte [verr], 0x00
+          mov       si, buf
+          call      killspc
+          cmp       byte [si], 0
+          je        .2
+          cmp       byte [si], '/'
+          je        .1
+          jmp       args
+.1:       mov       ah, byte [si+1]
+          call      smash
+          mov       byte [verr], 0xFF
+          cmp       ah, 'R'
+          je        .2
+          mov       [xswitch], ah       ; Set up message
+          mov       dx, eswitch         ; "Invalid switch"
+          jmp       scream
+.2:       mov       dx, ecrlf
+          call      wrstr
+          stc
           mov       ax, 0x4452
           int       0x21
-          jc        .1                  ; Not DR DOS
+          jc        .3                  ; Not DR DOS
+          mov       byte [verr], 0x00   ; Don't do VER /R on DR DOS
           mov       ah, 0x30
           int       0x21
           mov       [datebuf], ax
           mov       dx, edr
-          jmp       .3
-.1:       mov       ax, 0x3000
+          jmp       .6
+.3:       mov       ax, 0x3000
           int       0x21
-          mov       [datebuf], ax
+          cmp       al, 5               ; /R requires DOS 5
+          jae       .4
+          mov       byte [verr], 0x00
+.4:       mov       [datebuf], ax
           or        bh, bh
-          jz        .2                  ; PC DOS
+          jz        .5                  ; PC DOS
           cmp       bh, 0xFF
-          jne       .4
+          jne       .7
           mov       dx, ems
-          jmp short .3
-.2:       mov       dx, eibm
-.3:       call      wrstr
-.4:       mov       dx, edosver
+          jmp short .6
+.5:       mov       dx, eibm
+          test      byte [verr], 0xFF
+          jz        .6
+          mov       byte [verr], 0x80   ; mark set!
+.6:       call      wrstr
+.7:       mov       dx, edosver
           call      wrstr
           mov       al, [datebuf]
           xor       ah, ah
@@ -983,14 +1086,38 @@ c_ver:    stc
           mov       ah, 0x02
           int       0x21
           cmp       byte [datebuf+1], 10
-          jae       .5
+          jae       .8
           call      zero
-.5:       mov       al, [datebuf+1]
+.8:       mov       al, [datebuf+1]
           xor       ah, ah
           call      wrnum
           mov       dx, ecrlf
           call      wrstr
-          jmp short c_rem
+          cmp       byte [verr], 0
+          jne       .9
+          jmp       c_rem
+.9:       mov       dx, erev
+          call      wrstr
+          mov       ax, 0x3306          ; TRUEVER
+          int       0x21
+          push      dx
+          add       dl, '0'
+          cmp       byte [verr], 0x80   ; mark get!
+          je        .10                 ; use letters for MS-DOS,
+                                        ;     numbers for PC DOS
+          add       dl, 'A'-'0'
+.10:      mov       ah, 0x02
+          int       0x21
+          mov       dx, edosisin
+          call      wrstr
+          pop       dx
+          test      dh, 0x10
+          je        .11
+          mov       dx, ehidos
+          jmp short .12
+.11:      mov       dx, elodos
+.12:      call      wrstr
+          jmp       c_rem
 
 c_truenm: mov       ah, [buf]           ; No arg?
           or        ah, ah
@@ -1328,7 +1455,38 @@ hasser:   mov       dx, mvolser
           mov       dx, ecrlf
           call      wrstr
 noser:    ret
-          
+
+c_ctty:   call      argsan
+          mov       ah, 0x3D            ; OPEN
+          mov       dx, buf
+          int       0x21
+          jc        .1
+          mov       bx, ax
+          mov       ax, 0x4400          ; IOCTL
+          int       0x21
+          test      dl, 0x80            ; Device?
+          jnz       .2
+          mov       ah, 0x4E            ; CLOSE
+          int       0x21
+.1:       mov       dx, edev
+          jmp       scream
+.2:       xor       dh, dh
+          or        dl, 3               ; Mark as stdin and stdout
+          mov       ax, 0x4401
+          int       0x21
+          xor       cx, cx              ; ->0 (stdin)
+          mov       ah, 0x46            ; DUP2
+          int       0x21
+          inc       cx                  ; ->1 (stdout)
+          mov       ah, 0x46            ; DUP2
+          int       0x21
+          inc       cx                  ; ->2 (stderr)
+          mov       ah, 0x46            ; DUP2
+          int       0x21
+          mov       ah, 0x4E            ; CLOSE
+          int       0x21
+          jmp       c_rem
+
 cmdtab:   dw        c_break
           db        "BREAK", 0
           dw        c_cd
@@ -1339,6 +1497,8 @@ cmdtab:   dw        c_break
           db        "CHDIR", 0
           dw        c_cls
           db        "CLS", 0
+          dw        c_ctty
+          db        "CTTY", 0
           dw        c_date
           db        "DATE", 0
           dw        c_del
