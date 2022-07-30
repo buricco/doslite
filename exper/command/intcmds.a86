@@ -35,7 +35,7 @@
 ; PAUSE             Complete
 ; RD, RMDIR         Complete
 ; REM               Complete
-; REN, RENAME
+; REN, RENAME       Needs debugging
 ; TIME              Needs debugging
 ;   Supports the /T switch from Windows NT
 ; TRUENAME          Complete
@@ -80,10 +80,6 @@
 ; the more complicated /A, /O and /S completely out.
 ;
 ; LOADHIGH, I have no idea in hell how to implement this.
-;
-; REN, I have the original RMFCOM implementation which uses FCBs, but it might 
-; be better to use a hybrid FCB/Xenix method, similar to what I did with COMP, 
-; which like REN can take wildcards in both the source and target filespecs.
 ;
 ; As for any other commands, they are tied too deep into the internal state of 
 ; COMMAND.COM to worry about until more of the scaffolding is set up (e.g., 
@@ -143,8 +139,9 @@ eread:    db        "Cannot read file", 13, 10, "$"
 eactive:  db        "Active code page: $"
 ecpset:   db        "Cannot set code page", 13, 10, "$"
 ecpget:   db        "Cannot retrieve code page", 13, 10, "$"
-emkdir:   db        "Cannot create directory", 13, 10, "$"
-ermdir:   db        "Cannot remove directory", 13, 10, "$"
+emkdir:   db        "Unable to create directory", 13, 10, "$"
+eren:     db        "Duplicate filename or file not found", 13, 10, "$"
+ermdir:   db        "Invalid path, not directory or directory not empty", 13, 10, "$"
 edelok:   db        ": delete (Y/N)? $"
 eall:     db        "Are you sure (Y/N)? $"
 epwd:     db        "Current drive is no longer valid$"
@@ -841,12 +838,24 @@ c_cls:    mov       ax, 0x4400
 .3:       jmp       c_rem
 
 c_md:     call      argsan
-          mov       dx, buf
+          mov       dx, buf             ; Check if a DIRECTORY by this name
+          mov       ax, 0x4300          ;   exists, because there is a special
+          int       0x21                ;   error message for this.
+          jc        .1                  ; (Ignore an error; let MKDIR fail)
+          and       cl, 0x10
+          jz        .2                  ; Not directory: Access denied
+          mov       dx, emkdir          ; Directory exists
+          jmp short .4
+.1:       mov       dx, buf
           mov       ah, 0x39
           int       0x21
           jnc       mcrdend
-          mov       dx, emkdir
-          jmp       scream
+          cmp       al, 3
+          je        .3
+.2        mov       dx, e9001
+          jmp short .4
+.3:       mov       dx, epath
+.4:       jmp       scream
 c_cd:     cmp       byte [buf], 0       ; Null - get CWD on current drive
           jne       .1
           mov       ah, 0x19
@@ -1239,7 +1248,7 @@ c_truenm: mov       ah, [buf]           ; No arg?
 c_del:    mov       byte [eraq], 0      ; Set defaults
           mov       byte [eargflag], 0
           mov       si, buf             ; Command line buffer
-          mov       di, delbuf1
+          mov       di, parsbuf1
           call      killspc
           cmp       byte [si], 0        ; Blank command line
           jne       .1
@@ -1258,7 +1267,7 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
 .2:       mov       byte [eraq], 0xFF   ; Set prompt flag
           add       si, 2               ; Skip over it
           call      killspc
-          cmp       di, delbuf1         ; Was there anything typed?
+          cmp       di, parsbuf1        ; Was there anything typed?
           je        .1
           mov       byte [eargflag], 0xFF
           jmp short .1
@@ -1284,7 +1293,7 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
           jmp short .1
 .6:       mov       byte [di], 0        ; Add a NUL terminator
           inc       di
-          mov       si, delbuf1
+          mov       si, parsbuf1
           call      starstar
 .7:       cmp       byte [si], 0        ; Get basename
           je        .8
@@ -1295,14 +1304,14 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
           je        .9                  ; Yes, done
           cmp       byte [si], '\'      ; Path separator?
           je        .9                  ; Yes, done
-          cmp       si, delbuf1         ; Beginning of buffer?
+          cmp       si, parsbuf1        ; Beginning of buffer?
           jne       .8                  ; No, keep going
           dec       si
 .9:       inc       si
           mov       ax, 0x2900          ; Stuff basename into an FCB
-          mov       di, delbuf2
+          mov       di, parsbuf2
           int       0x21
-          mov       si, delbuf2+1       ; Did it come out as "???????????" ?
+          mov       si, parsbuf2+1      ; Did it come out as "???????????" ?
           mov       cl, 11
 .10:      cmp       byte [si], '?'
           jne       .12                 ; Nope
@@ -1326,8 +1335,8 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
           cmp       ah, 'N'             ; No?
           jne       .11
           jmp       die
-.12:      mov       byte [delbuf2], 0
-          mov       si, delbuf1         ; Do dirname
+.12:      mov       byte [parsbuf2], 0
+          mov       si, parsbuf1        ; Do dirname
 .13:      cmp       byte [si], 0
           je        .14
           inc       si
@@ -1337,12 +1346,12 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
           je        .15
           cmp       byte [si], '\'
           je        .15
-          cmp       si, delbuf1
+          cmp       si, parsbuf1
           jne       .14
 .15:      mov       bx, si              ; Copy dirname
           inc       bx
-          mov       si, delbuf1
-          mov       di, delbuf2
+          mov       si, parsbuf1
+          mov       di, parsbuf2
 .16:      mov       ah, [si]
           mov       [di], ah
           inc       si
@@ -1350,12 +1359,12 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
           cmp       si, bx              ; Until we hit our mark
           jne       .16
           mov       byte [di], 0        ; Add NUL terminator
-          mov       dx, delbuf3         ; set buffer for FINDFIRST
+          mov       dx, parsbuf3        ; set buffer for FINDFIRST
           mov       ah, 0x1A
           int       0x21
           mov       ah, 0x4E            ; FINDFIRST
           xor       cx, cx
-          mov       dx, delbuf1
+          mov       dx, parsbuf1
           int       0x21
           jnc       .19                 ; We gotcha!
           cmp       al, 0x12            ; No files found
@@ -1364,8 +1373,8 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
           jmp       scream
 .18:      mov       dx, e404            ; "File not found"
           jmp       scream
-.19:      mov       si, delbuf2         ; strcpy(buf4, buf2);
-          mov       di, delbuf4
+.19:      mov       si, parsbuf2        ; strcpy(buf4, buf2);
+          mov       di, parsbuf4
 .20:      mov       ah, [si]
           mov       [di], ah
           or        ah, ah
@@ -1373,7 +1382,7 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
           inc       si
           inc       di
           jmp short .20
-.21:      mov       si, delbuf3+0x1E    ; strcat(buf4, buf3+0x1E);
+.21:      mov       si, parsbuf3+0x1E   ; strcat(buf4, buf3+0x1E);
 .22:      mov       ah, [si]
           mov       [di], ah
           or        ah, ah
@@ -1383,7 +1392,7 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
           jmp short .22
 .23:      cmp       byte [eraq], 0x00   ; Skip if /P not set
           je        .26
-.24:      mov       dx, delbuf4         ; Output filename
+.24:      mov       dx, parsbuf4        ; Output filename
           call      wrstrc
           mov       dx, edelok          ; "Delete (Y/N)?"
           call      wrstr
@@ -1406,7 +1415,7 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
           jne       .27
           mov       ax, 0x4C00
           int       0x21                ; EXIT CODE 0
-.26:      mov       dx, delbuf4         ; Zap
+.26:      mov       dx, parsbuf4        ; Zap
           mov       ah, 0x41            ; UNLINK
           int       0x21
           jnc       .25                 ; Success
@@ -1560,6 +1569,176 @@ c_ctty:   call      argsan
           int       0x21
           jmp       c_rem
 
+; Parsing REN/RENAME:
+;
+; Source may contain a path and wildcards.  Target may contain wildcards but
+; NOT a path.  Use the same method (translated to ASM) as COMP to fill the
+; target wildcard.
+;
+; The parsed filespecs right out of the command line go into parsbuf1 and
+; parsbuf2.  Then we will get the DIRNAME into parsbuf3, and use parsbuf4 for
+; a wildcard check on parsbuf2. (Two FCBs.)  The filenames will then be built
+; in parsbuf5 and parsbuf6.
+;
+; (Wildcard support is currently broken.)
+
+c_ren:    mov       si, buf
+          mov       di, parsbuf1
+          call      killspc
+          cmp       byte [si], 0
+          jne       .2
+.1:       jmp       noargs              ; REN/RENAME takes two arguments and
+.2:       mov       ah, [si]            ; no switches.  So if any switches are
+          cmp       ah, '/'             ; found, or if the number of arguments
+          jne       .3                  ; is not two, die screaming.  This
+          mov       ah, [si+1]          ; requires a bit more complex parsing
+          call      smash               ; than most internal commands.
+          mov       [xswitch], ah
+          mov       dx, eswitch
+          jmp       scream
+.3:       cmp       ah, ' '
+          je        .4
+          cmp       ah, 0x09
+          jne       .6
+.4:       cmp       di, parsbuf2
+          jae       .5
+          mov       byte [di], 0
+          mov       di, parsbuf2
+          call      killspc
+          jmp short .2
+.5:       xor       di, di
+          jmp short .2
+.6:       or        di, di
+          jnz       .7
+          jmp       args
+.7:       cmp       byte [si], 0
+          je        .8
+          mov       [di], ah
+          inc       si
+          inc       di
+          jmp short .2
+.8:       mov       byte [di], 0
+          cmp       di, parsbuf2        ; Arg count check
+          jbe       .1
+          mov       si, parsbuf1
+.9:       cmp       byte [si], 0        ; Search for NUL terminator
+          je        .10
+          inc       si
+          jmp short .9
+.10:      dec       si                  ; Tick back
+          mov       di, parsbuf3
+          cmp       si, parsbuf1        ; No dirname
+          je        .13
+          mov       ah, [si]
+          cmp       ah, '\'
+          je        .11
+          cmp       ah, ':'
+          jne       .10
+.11:      inc       si                  ;
+          mov       dx, si
+          mov       si, parsbuf1
+          mov       di, parsbuf3
+.12:      mov       ah, [si]
+          mov       [di], ah
+          or        ah, ah
+          jz        .14
+          inc       si
+          inc       di
+          cmp       si, dx
+          jb        .12
+.13:      cmp       byte [parsbuf2+1], ':'
+          je        .15                 ; Can't rename across drives
+          mov       byte [di], 0
+.14:      mov       dx, ffblk
+          mov       ah, 0x1A            ; SETDTA
+          int       0x21
+          mov       ah, 0x4E
+          xor       cx, cx
+          mov       dx, parsbuf1
+          int       0x21
+          jnc       .16
+.15:      jmp       noren
+.16:      mov       si, parsbuf3
+          mov       di, parsbuf5
+          mov       bx, parsbuf6
+.17:      mov       ah, [si]            ; Copy path
+          mov       [di], ah
+          mov       [bx], ah
+          or        ah, ah
+          jz        .18
+          inc       si
+          inc       di
+          inc       bx
+          jmp short .17
+.18:      mov       si, fin             ; Copy filename
+.19:      mov       ah, [si]
+          mov       [di], ah
+          or        ah, ah
+          jz        .20
+          inc       si
+          inc       di
+          jmp short .19
+.20:      mov       si, fin             ; Filename to FCB1
+          mov       ax, 0x2900
+          mov       di, parsbuf4
+          int       0x21
+          mov       si, parsbuf2        ; Filename to FCB2
+          mov       ax, 0x2900
+          mov       di, parsbuf4+40
+          int       0x21
+.21:      mov       si, parsbuf4+1
+          mov       di, parsbuf4+41
+          mov       cl, 11
+.22:      mov       ah, [di]            ; Replace ? with source
+          cmp       ah, '?'
+          jne       .23
+          mov       ah, [si]
+          mov       [di], ah
+.23:      inc       si                  ; Tick down
+          inc       di
+          dec       cl
+          jnz       .22
+          mov       si, parsbuf4+41     ; Copy filename out of the FCB
+          mov       di, bx
+          mov       cl, 8
+.24:      mov       ah, [si]
+          mov       [di], ah
+          inc       si
+          inc       di
+          dec       cl
+          jnz       .24
+.25:      dec       di                  ; RTRIM it and add "." at the end
+          cmp       byte [di], ' '
+          je        .25
+          mov       byte [di+1], '.'
+          add       di, 2
+          mov       cl, 3               ; Copy the extension
+.26:      mov       ah, [si]
+          mov       [di], ah
+          inc       si
+          inc       di
+          dec       cl
+          jnz       .26
+.27:      dec       di                  ; RTRIM it and add NUL terminator
+          cmp       byte [di], ' '
+          jne       .28
+          mov       byte [di], 0
+          jmp short .27
+.28:      mov       dx, parsbuf5
+          mov       di, parsbuf6
+          mov       ah, 0x56            ; RENAME
+          int       0x21
+          jc        .15
+          mov       ah, 0x4F            ; Anything left?
+          int       0x21
+          jnc       .16
+          cmp       al, 0x12
+          jne       noren
+.29:      mov       ax, 0x4C00
+          int       0x21
+noren:    mov       dx, eren
+          jmp       scream
+
 cmdtab:   dw        c_break
           db        "BREAK", 0
           dw        c_cd
@@ -1590,6 +1769,10 @@ cmdtab:   dw        c_break
           db        "RD", 0
           dw        c_rem
           db        "REM", 0
+          dw        c_ren
+          db        "REN", 0
+          dw        c_ren
+          db        "RENAME", 0
           dw        c_rd
           db        "RMDIR", 0
           dw        c_time
@@ -1610,7 +1793,9 @@ dateseqs: dw        emdy, edmy, eymd
 
 linbuf:   dw        0x0000              ; FALL INTO
 buf:
-delbuf1   equ       buf+128
-delbuf2   equ       buf+192
-delbuf3   equ       buf+256
-delbuf4   equ       buf+320
+parsbuf1  equ       buf+128
+parsbuf2  equ       buf+192
+parsbuf3  equ       buf+256
+parsbuf4  equ       buf+320
+parsbuf5  equ       buf+400
+parsbuf6  equ       buf+464
