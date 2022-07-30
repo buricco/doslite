@@ -11,9 +11,9 @@
 ; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
 ; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
 
-; This code is UNTESTED.
+; This code implements the DEL command as implemented in PC DOS 4 and later.
 ;
-; It implements the DEL command as implemented in PC DOS 4 and later.
+; It does not automatically add "\*.*" to directories.
 
           cpu       8086
           org       0x0100
@@ -41,7 +41,7 @@ okdos:    mov       byte [eraq], 0      ; Set defaults
           mov       ah, [si+1]
           call      smash               ; Force uppercase
           cmp       ah, 'P'
-          jne       .2
+          je        .2
           mov       [xswitch], ah       ; Set up message
           mov       dx, eswitch         ; "Invalid switch"
           jmp       scream
@@ -52,8 +52,7 @@ okdos:    mov       byte [eraq], 0      ; Set defaults
           je        .1
           mov       byte [eargflag], 0xFF
           jmp short .1
-.3:       mov       ah, [si]
-          cmp       ah, ' '             ; End of parameter
+.3:       cmp       ah, ' '             ; End of parameter
           je        .5
           cmp       ah, 0x09
           je        .5
@@ -95,20 +94,22 @@ okdos:    mov       byte [eraq], 0      ; Set defaults
           mov       si, buf2+1          ; Did it come out as "???????????" ?
           mov       cl, 11
 .10:      cmp       byte [si], '?'
-          jne       .11                 ; Nope
+          jne       .12                 ; Nope
           inc       si
           dec       cl
           jne       .10
           cmp       byte [eraq], 0      ; Was /P set?
-          je        .12                 ; Yes, so skip
+          jne       .12                 ; Yes, so skip
 .11:      mov       dx, estar           ; "Are you sure (Y/N)?"
           call      wrstr
           mov       ah, 0x01            ; GETCHE
           int       0x21
-          mov       ah, al              ; Force uppercase
-          call      smash
+          push      ax
           mov       dx, ecrlf
           call      wrstr
+          pop       ax
+          mov       ah, al              ; Force uppercase
+          call      smash
           cmp       ah, 'Y'             ; Yes?
           je        .12
           cmp       ah, 'N'             ; No?
@@ -126,7 +127,7 @@ okdos:    mov       byte [eraq], 0      ; Set defaults
           cmp       byte [si], '\'
           je        .15
           cmp       si, buf1
-          jne       .17
+          jne       .14
 .15:      mov       bx, si              ; Copy dirname
           inc       bx
           mov       si, buf1
@@ -138,68 +139,70 @@ okdos:    mov       byte [eraq], 0      ; Set defaults
           cmp       si, bx              ; Until we hit our mark
           jne       .16
           mov       byte [di], 0        ; Add NUL terminator
-.17:      mov       dx, buf3            ; set buffer for FINDFIRST
+          mov       dx, buf3            ; set buffer for FINDFIRST
           mov       ah, 0x1A
           int       0x21
           mov       ah, 0x4E            ; FINDFIRST
           xor       cx, cx
           mov       dx, buf1
           int       0x21
-          jnc       .20                 ; We gotcha!
+          jnc       .19                 ; We gotcha!
           cmp       al, 0x12            ; No files found
-          je        .19
-.18:      mov       dx, epath           ; "Invalid path"
+          je        .18
+.17:      mov       dx, epath           ; "Invalid path"
           jmp       scream
-.19:      mov       dx, e404            ; "File not found"
+.18:      mov       dx, e404            ; "File not found"
           jmp       scream
-.20:      mov       si, buf2            ; strcpy(buf4, buf2);
+.19:      mov       si, buf2            ; strcpy(buf4, buf2);
           mov       di, buf4
-.21:      mov       ah, [si]
+.20:      mov       ah, [si]
           mov       [di], ah
           or        ah, ah
-          jz        .22
+          jz        .21
           inc       si
           inc       di
-          jmp short .21
-.22:      mov       si, buf3+0x1E       ; strcat(buf4, buf3+0x1E);
-.23:      mov       ah, [si]
+          jmp short .20
+.21:      mov       si, buf3+0x1E       ; strcat(buf4, buf3+0x1E);
+.22:      mov       ah, [si]
           mov       [di], ah
           or        ah, ah
-          jz        .24
+          jz        .23
           inc       si
           inc       di
-          jmp short .23
-.24:      cmp       byte [eraq], 0x00   ; Skip if /P not set
-          je        .28
-.25:      mov       dx, buf4            ; Output filename
+          jmp short .22
+.23:      cmp       byte [eraq], 0x00   ; Skip if /P not set
+          je        .26
+.24:      mov       dx, buf4            ; Output filename
           call      wrstrc
           mov       dx, eok             ; "Delete (Y/N)?"
           call      wrstr
-.26:      mov       ah, 0x01            ; GETCHE
+          mov       ah, 0x01            ; GETCHE
           int       0x21
           mov       ah, al              ; Force uppercase
           call      smash
+          push      ax
           mov       dx, ecrlf
           call      wrstr
+          pop       ax
           cmp       ah, 'Y'             ; Yes?
-          je        .28                 ; Yes, go ahead
+          je        .26                 ; Yes, go ahead
           cmp       ah, 'N'             ; No?
-          jne       .25                 ; No, ask again
-.27:      mov       ah, 0x4F            ; FINDNEXT
+          jne       .24                 ; No, ask again
+.25:      mov       ah, 0x4F            ; FINDNEXT
           int       0x21
-          jnc       .20                 ; Go back, Jack, and do it again
+          jnc       .19                 ; Go back, Jack, and do it again
           cmp       al, 0x12            ; No more files
-          jne       .29
+          jne       .27
           mov       ax, 0x4C00
           int       0x21                ; EXIT CODE 0
-.28:      mov       dx, buf4            ; Zap
+.26:      mov       dx, buf4            ; Zap
           mov       ah, 0x41            ; UNLINK
           int       0x21
-          jnc       .27                 ; Success
-.29:      cmp       al, 0x02
-          je        .19
-          cmp       al, 0x03
+          jnc       .25                 ; Success
+.27:      cmp       al, 0x02
           je        .18
+          cmp       al, 0x03
+          je        .17
           mov       dx, e9001           ; FALL INTO
 scream:   call      wrstr
 die:      mov       ax, 0x4C01
