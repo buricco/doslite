@@ -104,6 +104,7 @@ void mem_main (void)
  
  if (emsfound)
  {
+#if 0 /* this hangs DOSBOX */
   /* Bug in MS-DOS 6.0's EMM386: make sure EMM386 is active */
   _asm mov ax, 0xFFA5;         /* ISEMM386 */
   _asm int 0x67;
@@ -121,7 +122,8 @@ void mem_main (void)
     emsfound=!(emsfound&0x01);
    }
   }
-  
+#endif
+
   _asm mov ah, 0x42;
   _asm int 0x67;
   _asm mov chaindirty, ah;    /* 0=OK */
@@ -223,7 +225,7 @@ void mem_main (void)
  if (mode)
   printf ("\n"
           "  Address       Name        Size\n"
-          "  \xC4\xC4\xC4\xC4\xC4\xC4\xC4     \xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4     \xC4\xC4\xC4\xC4\xC4\xC4\n"); 
+          "  -------     --------     ------\n"); 
 
  while (1)
  {
@@ -293,6 +295,8 @@ void mem_main (void)
    void far *nextdev;
    byte far *devnam;
    byte curdrv;
+   
+   mode--; /* Don't do this twice. (RxDOS) */
    
    /* Get the first device header. */
    _asm push es;
