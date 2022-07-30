@@ -26,10 +26,11 @@
 ; CTTY
 ; DATE              Needs debugging
 ;   Supports the /T switch from Windows NT
-; DEL, ERASE
+; DEL, ERASE        Complete*
+;   *DEL on a directory is not treated as deleting all files in the directory
 ; DIR
 ; ECHO              Complete*
-;   *the ON and OFF features are specific to batch files and are not supported
+;   *The ON and OFF features are specific to batch files and are not supported
 ; FOR
 ; LH, LOADHIGH
 ; MD, MKDIR         Complete
@@ -41,11 +42,11 @@
 ;   Supports the /T switch from Windows NT
 ; TRUENAME          Complete
 ; TYPE              Complete
-; VER               Complete
-;   Does not support the /R switch from MS-DOS/PC DOS 5+
+; VER               Complete*
+;   *Does not support the /R switch from MS-DOS/PC DOS 5+
 ; VERIFY            Complete
-; VOL               Complete
-;   Spurious detection of VSNs, this problem is shared with LABEL
+; VOL               Complete*
+;   *Spurious detection of VSNs, this problem is shared with LABEL
 ;
 ; Error checking is spotty.
 
@@ -59,6 +60,36 @@ entry:    mov       ah, 0x30
           mov       dx, edos1
           call      wrstr
           int       0x20                ; DOS 1 EXIT
+crittab:  db        "Write protect violation$"
+          db        "Invalid unit$"
+          db        "Drive not ready$"
+          db        "Invalid device request$"
+          db        "Data CRC failure$"
+          db        "Invalid device request parameters$"
+          db        "Seek error$"
+          db        "Invalid media type$"
+          db        "Sector not found$"
+          db        "Printer out of paper$"
+          db        "Write fault$"
+          db        "Read fault$"
+          db        "General failure$"
+          db        "Sharing violation$"
+          db        "Lock violation$"
+          db        "Invalid disk change$"
+          db        "FCB unavailable$"
+          db        "Share buffer overflow$"
+          db        0
+anyerr:   db        "Unknown error$"
+ereading: db        " reading $"
+ewriting: db        " writing $"
+edrive:   db        "drive $"
+edevice:  db        "device $"
+eabort:   db        "Abort$"
+eretry:   db        "Retry$"
+eignore:  db        "Ignore$"
+efail:    db        "Fail$"
+ecomma:   db        ", $"
+eqmark:   db        "? $"
 edos1:    db        "Incorrect DOS version", 13, 10, "$"
 enoargs:  db        "Required parameter missing", 13, 10, "$"
 eargs:    db        "Too many parameters", 13, 10, "$"
@@ -66,6 +97,8 @@ earg:     db        "Invalid parameter", 13, 10, "$"
 ecmd:     db        "Invalid command", 13, 10, "$"
 efunc:    db        "Invalid function", 13, 10, "$"
 e404:     db        "File not found", 13, 10, "$"
+epath:    db        "Invalid path", 13, 10, "$"
+e9001:    db        "Access denied", 13, 10, "$"
 eread:    db        "Cannot read file", 13, 10, "$"
 eactive:  db        "Active code page: $"
 ecpset:   db        "Cannot set code page", 13, 10, "$"
@@ -73,6 +106,8 @@ ecpget:   db        "Cannot retrieve code page", 13, 10, "$"
 emkdir:   db        "Cannot create directory", 13, 10, "$"
 echdir:   db        "Cannot set directory", 13, 10, "$"
 ermdir:   db        "Cannot remove directory", 13, 10, "$"
+edelok:   db        ": delete (Y/N)? $"
+eall:     db        "Are you sure (Y/N)? $"
 epwd:     db        "Current drive is no longer valid", 13, 10, "$"
 ecurdate: db        "Current date is $"
 ecurtime: db        "Current time is $"
@@ -100,6 +135,8 @@ mvolser:  db        " Volume Serial Number is $"
 namtank:  db        "           ", 0
 epause:   db        "Press any key to continue . . . $"
 edays:    db        "Sun$Mon$Tue$Wed$Thu$Fri$Sat$"
+eswitch:  db        "Invalid switch - /"
+xswitch:  db        0
 ecrlf:    db        13, 10, "$"
 eansi:    db        27, "[2J$"
 
@@ -114,12 +151,15 @@ osmajor:  db        0x00
 ffblk:    times 128 db 0x00
 fin       equ       ffblk+0x001E
 drvchk:   db        0x00
+eraq:     db        0x00
+eargflag: db        0x00
 cmdname:  db        9 dup 0x00
 tank:     dw        0x0000
 inword:   dw        0x0000
 datebuf:  db        4 dup 0x00
 numbuf:   db        6 dup 0x00
 i18nbuf:  db        34 dup 0x00
+old24:    dd        0x00000000
 
 killspc:  cmp       byte [si], 0
           je        .2
@@ -183,6 +223,22 @@ wrstrc:   push      di
           jmp short .1
 .2:       pop       di
           ret
+getmsg24: mov       cx, di              ; If DI.L=error number, print error
+          xor       ch, ch
+          mov       si, crittab
+.1:       cmp       ch, cl
+          je        .5
+.2:       cmp       byte [si], 0
+          je        .5
+.3:       cmp       byte [si], '$'
+          je        .4
+          inc       si
+          jmp short .3
+.4:       inc       ch
+          jmp short .1
+.5:       inc       si
+.6:       mov       dx, si
+          jmp short wrstr
 
 wrwrd:    mov       [tank+1], al
           call      wrbyt
@@ -203,6 +259,48 @@ hexit:    and       ah, 0x0F            ; Convert nibble to ASCII
           int       0x21
           ret
 
+; SKELETON
+
+new24:    push      bx
+          push      cx
+          push      dx
+          push      si
+          push      di
+          push      bp
+          push      ds
+          push      es
+          
+                    
+          pop       es
+          pop       ds
+          pop       bp
+          pop       di
+          pop       si
+          pop       dx
+          pop       cx
+          pop       bx
+          iret 
+
+init:     mov       ax, 0x3524
+          int       0x21
+          mov       [old24+2], es
+          push      cs
+          pop       es
+          mov       [old24], bx
+;         mov       ax, 0x2524
+;         mov       dx, new24
+;         int       0x21
+          ret
+          
+uninit:   mov       ax, 0x2524
+          mov       dx, [old24+2]
+          mov       ds, dx
+          mov       dx, cs:[old24]
+          int       0x21
+          push      cs
+          pop       ds
+          ret
+
 wrstr:    mov       ah, 0x09
           int       0x21
           ret
@@ -211,6 +309,7 @@ okdos:    mov       si, 0x0081
           call      killspc
           cmp       byte [si], 0x0D
           jne       .1
+          call      uninit
           mov       ax, 0x4CFF
           int       0x21
 .1:       mov       ah, [si]            ; Get command
@@ -230,6 +329,7 @@ okdos:    mov       si, 0x0081
           jb        .1                  ; FALL INTO
 badcmd:   mov       dx, ecmd            ; FALL INTO
 scream:   call      wrstr
+die:      call      uninit
           mov       ax, 0x4C01
           int       0x21
 cmdonly:  mov       byte [di], 0
@@ -842,7 +942,8 @@ c_echo:   mov       si, buf
           jmp short .1
 .2:       mov       dx, ecrlf
           call      wrstr               ; FALL INTO
-c_rem:    mov       ax, 0x4C00          ; Also successful exit.
+c_rem:    call      uninit
+          mov       ax, 0x4C00          ; Also successful exit.
           int       0x21
 
 c_pause:  mov       dx, epause
@@ -933,6 +1034,186 @@ c_truenm: mov       ah, [buf]           ; No arg?
           mov       dx, buf+128
           call      wrstr
           jmp       c_rem
+
+c_del:    mov       byte [eraq], 0      ; Set defaults
+          mov       byte [eargflag], 0
+          mov       si, buf             ; Command line buffer
+          mov       di, delbuf1
+          call      killspc
+          cmp       byte [si], 0        ; Blank command line
+          jne       .1
+          mov       dx, enoargs         ; "Required parameter missing"
+          jmp       scream
+.1:       mov       ah, [si]
+          cmp       ah, '/'             ; Switch?
+          jne       .3                  ; No, skip
+          mov       ah, [si+1]
+          call      smash               ; Force uppercase
+          cmp       ah, 'P'
+          je        .2
+          mov       [xswitch], ah       ; Set up message
+          mov       dx, eswitch         ; "Invalid switch"
+          jmp       scream
+.2:       mov       byte [eraq], 0xFF   ; Set prompt flag
+          add       si, 2               ; Skip over it
+          call      killspc
+          cmp       di, delbuf1         ; Was there anything typed?
+          je        .1
+          mov       byte [eargflag], 0xFF
+          jmp short .1
+.3:       cmp       ah, ' '             ; End of parameter
+          je        .5
+          cmp       ah, 0x09
+          je        .5
+          cmp       ah, 0               ; End of line
+          je        .6
+          cmp       byte [eargflag], 0xFF
+          jne       .4                  ; OK to copy char
+          mov       dx, eargs           ; "Too many arguments"
+          jmp       scream
+.4:       call      smash               ; Force uppercase
+          mov       [di], ah            ; Store
+          inc       si                  ; Adjust pointers
+          inc       di
+          cmp       si, 0x0100          ; End of buffer
+          jne       .1
+          jmp short .6
+.5:       call      killspc             ; Mark we have a parameter alreaady
+          mov       byte [eargflag], 0xFF
+          jmp short .1
+.6:       mov       byte [di], 0        ; Add a NUL terminator
+          inc       di
+          mov       si, delbuf1
+.7:       cmp       byte [si], 0        ; Get basename
+          je        .8
+          inc       si
+          jmp short .7
+.8:       dec       si
+          cmp       byte [si], ':'      ; Drive separator?
+          je        .9                  ; Yes, done
+          cmp       byte [si], '\'      ; Path separator?
+          je        .9                  ; Yes, done
+          cmp       si, delbuf1         ; Beginning of buffer?
+          jne       .8                  ; No, keep going
+          dec       si
+.9:       inc       si
+          mov       ax, 0x2900          ; Stuff basename into an FCB
+          mov       di, delbuf2
+          int       0x21
+          mov       si, delbuf2+1       ; Did it come out as "???????????" ?
+          mov       cl, 11
+.10:      cmp       byte [si], '?'
+          jne       .12                 ; Nope
+          inc       si
+          dec       cl
+          jne       .10
+          cmp       byte [eraq], 0      ; Was /P set?
+          jne       .12                 ; Yes, so skip
+.11:      mov       dx, eall            ; "Are you sure (Y/N)?"
+          call      wrstr
+          mov       ah, 0x01            ; GETCHE
+          int       0x21
+          push      ax
+          mov       dx, ecrlf
+          call      wrstr
+          pop       ax
+          mov       ah, al              ; Force uppercase
+          call      smash
+          cmp       ah, 'Y'             ; Yes?
+          je        .12
+          cmp       ah, 'N'             ; No?
+          jne       .11
+          jmp       die
+.12:      mov       byte [delbuf2], 0
+          mov       si, delbuf1         ; Do dirname
+.13:      cmp       byte [si], 0
+          je        .14
+          inc       si
+          jmp short .13
+.14:      dec       si
+          cmp       byte [si], ':'
+          je        .15
+          cmp       byte [si], '\'
+          je        .15
+          cmp       si, delbuf1
+          jne       .14
+.15:      mov       bx, si              ; Copy dirname
+          inc       bx
+          mov       si, delbuf1
+          mov       di, delbuf2
+.16:      mov       ah, [si]
+          mov       [di], ah
+          inc       si
+          inc       di
+          cmp       si, bx              ; Until we hit our mark
+          jne       .16
+          mov       byte [di], 0        ; Add NUL terminator
+          mov       dx, delbuf3         ; set buffer for FINDFIRST
+          mov       ah, 0x1A
+          int       0x21
+          mov       ah, 0x4E            ; FINDFIRST
+          xor       cx, cx
+          mov       dx, delbuf1
+          int       0x21
+          jnc       .19                 ; We gotcha!
+          cmp       al, 0x12            ; No files found
+          je        .18
+.17:      mov       dx, epath           ; "Invalid path"
+          jmp       scream
+.18:      mov       dx, e404            ; "File not found"
+          jmp       scream
+.19:      mov       si, delbuf2         ; strcpy(buf4, buf2);
+          mov       di, delbuf4
+.20:      mov       ah, [si]
+          mov       [di], ah
+          or        ah, ah
+          jz        .21
+          inc       si
+          inc       di
+          jmp short .20
+.21:      mov       si, delbuf3+0x1E    ; strcat(buf4, buf3+0x1E);
+.22:      mov       ah, [si]
+          mov       [di], ah
+          or        ah, ah
+          jz        .23
+          inc       si
+          inc       di
+          jmp short .22
+.23:      cmp       byte [eraq], 0x00   ; Skip if /P not set
+          je        .26
+.24:      mov       dx, delbuf4         ; Output filename
+          call      wrstrc
+          mov       dx, edelok          ; "Delete (Y/N)?"
+          call      wrstr
+          mov       ah, 0x01            ; GETCHE
+          int       0x21
+          mov       ah, al              ; Force uppercase
+          call      smash
+          push      ax
+          mov       dx, ecrlf
+          call      wrstr
+          pop       ax
+          cmp       ah, 'Y'             ; Yes?
+          je        .26                 ; Yes, go ahead
+          cmp       ah, 'N'             ; No?
+          jne       .24                 ; No, ask again
+.25:      mov       ah, 0x4F            ; FINDNEXT
+          int       0x21
+          jnc       .19                 ; Go back, Jack, and do it again
+          cmp       al, 0x12            ; No more files
+          jne       .27
+          mov       ax, 0x4C00
+          int       0x21                ; EXIT CODE 0
+.26:      mov       dx, delbuf4         ; Zap
+          mov       ah, 0x41            ; UNLINK
+          int       0x21
+          jnc       .25                 ; Success
+.27:      cmp       al, 0x02
+          je        .18
+          cmp       al, 0x03
+          je        .17
+          mov       dx, e9001           ; FALL INTO
+          jmp       scream
 
 c_vol:    cmp       byte [buf], 0
           je        .2
@@ -1060,8 +1341,12 @@ cmdtab:   dw        c_break
           db        "CLS", 0
           dw        c_date
           db        "DATE", 0
+          dw        c_del
+          db        "DEL", 0
           dw        c_echo
           db        "ECHO", 0
+          dw        c_del
+          db        "ERASE", 0
           dw        c_md
           db        "MD", 0
           dw        c_md
@@ -1092,3 +1377,7 @@ dateseqs: dw        emdy, edmy, eymd
 
 linbuf:   dw        0x0000              ; FALL INTO
 buf:
+delbuf1   equ       buf+128
+delbuf2   equ       buf+192
+delbuf3   equ       buf+256
+delbuf4   equ       buf+320
