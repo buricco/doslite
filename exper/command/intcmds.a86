@@ -26,8 +26,7 @@
 ; CTTY              Implemented but not working
 ; DATE              Needs debugging
 ;   Supports the /T switch from Windows NT
-; DEL, ERASE        Complete*
-;   *DEL on a directory is not treated as deleting all files in the directory
+; DEL, ERASE        Complete
 ; DIR
 ; ECHO              Complete*
 ;   *The ON and OFF features are specific to batch files and are not supported
@@ -223,6 +222,32 @@ smash:    cmp       ah, 'a'             ; Smash lowercase to uppercase.
           ja        .1
           and       ah, 0x5F
 .1:       ret
+
+; Append "\*.*" if si points to the name of a directory 
+; (useful for DEL and DIR).
+
+starstar: push      si                  ; Save pointer
+          mov       dx, si              ; Get attributes
+          mov       ax, 0x4300
+          int       0x21
+          pop       si                  ; Restore pointer
+          jc        .1                  ; Just return on fail
+          and       cl, 0x10            ; If not directory, just return
+          jnz       .2
+.1:       ret
+.2:       push      si                  ; Save pointer
+.3:       mov       ah, [si]
+          or        ah, ah              ; Find NUL terminator
+          jz        .4
+          inc       si
+          jmp short .3
+.4:       mov       word [si], '\*'     ; Add "\*.*" at the end
+          add       si, 2
+          mov       word [si], '.*'
+          add       si, 2
+          mov       byte [si], 0
+          pop       si                  ; Restore pointer
+          ret
 
 getlin:   mov       word [linbuf], 0x0080
           mov       ah, 0x0A
@@ -1260,6 +1285,7 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
 .6:       mov       byte [di], 0        ; Add a NUL terminator
           inc       di
           mov       si, delbuf1
+          call      starstar
 .7:       cmp       byte [si], 0        ; Get basename
           je        .8
           inc       si
@@ -1404,8 +1430,7 @@ c_vol:    cmp       byte [buf], 0
 .2:       mov       ah, 0x19            ; GETDISK
           int       0x21
           add       al, 'A'
-.3:       mov       [volblk], al        ; XXX: C version also checks drive
-          
+.3:       mov       [volblk], al
           mov       dx, mvolume
           call      wrstr
           mov       ah, 0x02            ; PUTCHAR
@@ -1414,7 +1439,6 @@ c_vol:    cmp       byte [buf], 0
           mov       dx, ffblk
           mov       ah, 0x1A            ; SETDTA
           int       0x21
-          
           mov       ax, 0x4E00          ; FINDFIRST
           mov       cx, 0x0008          ; label
           mov       dx, volblk
