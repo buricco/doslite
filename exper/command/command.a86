@@ -27,7 +27,7 @@
 ; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
 ; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-; This is the start of an implementation of COMMAND.COM.
+; This is the very rough start of an implementation of COMMAND.COM.
 ; Some of the implementations of commands are adapted from my previous attempt
 ; from 20 years ago, but I have rewritten everything into ASM.
 ;
@@ -207,6 +207,7 @@ ecrlf:    db        13, 10, "$"
 eansi:    db        27, "[2J$"
 eprompt:  db        "PROMPT", 0
 edefpmpt: db        "$P$G", 0
+signon:   db        "Litecom v0.00", 13, 10, "$"
 ecmdcm:   db        "Litecom$"
 ebs:      db        8, ' ', 8, '$'
 
@@ -304,18 +305,18 @@ getlin:   mov       word [linbuf], 0x0080
           ret
 
 ; Read a line from the keyboard using DOSKEY, if available, and fall back to
-; plain MS-DOS API if not.  Not hooked up to anything yet.
+; plain MS-DOS API if not.  (DOSKEY bit not currently working)
 
 xgetlin:  mov       word [linbuf], 0x0080
-          mov       ax, 0x4800          ; Is DOSKEY installed?
-          int       0x2F
+;         mov       ax, 0x4800          ; Is DOSKEY installed?
+;         int       0x2F
           mov       dx, linbuf          ; Set up the pointer either way
-          or        al, al              ; 0=not installed
-          jz        .1                  ; Not installed; use DOS GETLIN
-          mov       ax, 0x4810          ; Installed; use DOSKEY GETLIN
-          int       0x2F
-          or        ax, ax              ; 0=no error
-          jz        .2                  ; ...so if there WAS an error,
+;         or        al, al              ; 0=not installed
+;         jz        .1                  ; Not installed; use DOS GETLIN
+;         mov       ax, 0x4810          ; Installed; use DOSKEY GETLIN
+;         int       0x2F
+;         or        ax, ax              ; 0=no error
+;         jz        .2                  ; ...so if there WAS an error,
 .1:       mov       ah, 0x0A            ;   fall back on the MS-DOS API.
           int       0x21
 .2:       mov       dx, ecrlf
@@ -499,14 +500,14 @@ uninit:   mov       ax, 0x2524
 wrstr:    mov       ah, 0x09
           int       0x21
           ret
-okdos:    mov       si, 0x0081
+okdos:    mov       dx, signon
+          call      wrstr
+cmdloop:  mov       si, 0x0081
           mov       di, cmdname
           call      killspc
           cmp       byte [si], 0x0D
           jne       .1
-          call      uninit
-          mov       ax, 0x4CFF
-          int       0x21
+          jmp       newcmd
 .1:       mov       ah, [si]            ; Get command
           cmp       ah, 0x0D
           je        cmdonly
@@ -564,8 +565,9 @@ selcmd:   mov       bx, cmdtab
           or        dx, dx
           je        badcmd              ; Yes, die screaming
           jmp short .1
-.6:       jmp       [bx]
-
+.6:       call      [bx]
+          jmp       newcmd
+          
 space:    mov       dl, ' '
           jmp short chrcom
 zero:     mov       dl, '0'
@@ -1167,9 +1169,7 @@ c_echo:   mov       si, buf
           jmp short .1
 .2:       mov       dx, ecrlf
           call      wrstr               ; FALL INTO
-c_rem:    call      uninit
-          mov       ax, 0x4C00          ; Also successful exit.
-          int       0x21
+c_rem:    ret
 
 c_pause:  mov       dx, epause
           call      wrstr
@@ -2199,6 +2199,8 @@ cmdtab:   dw        c_break
           db        "ECHO", 0
           dw        c_del
           db        "ERASE", 0
+          dw        c_exit
+          db        'EXIT', 0
           dw        c_md
           db        "MD", 0
           dw        c_md
@@ -2314,7 +2316,9 @@ doprompt: mov       dx, eprompt
           jz        .17
           cmp       ah, '$'
           jne       .16
+          int3
           mov       ah, [si]
+          inc       si
           call      smash
           cmp       ah, 'B'
           jne       .4
@@ -2322,28 +2326,22 @@ doprompt: mov       dx, eprompt
           jmp       .16
 .4:       cmp       ah, 'D'
           jne       .5
-          push      ds
-          push      cs
-          pop       ds
+          push      si
           call      wrdate
-          pop       ds
+          pop       si
           jmp short .3
 .5:       cmp       ah, 'E'
-          jne       .5
+          jne       .6
           mov       ah, 0x1A
-          jmp short .16
+          jmp       .16
 .6:       cmp       ah, 'G'
           jne       .7
           mov       ah, '>'
           jmp short .16
 .7:       cmp       ah, 'H'
           jne       .8
-          push      ds
-          push      cs
-          pop       ds
           mov       dx, ebs
           call      wrstr
-          pop       ds
           jmp short .3
 .8:       cmp       ah, 'L'
           jne       .9
@@ -2358,11 +2356,9 @@ doprompt: mov       dx, eprompt
           jmp short .16
 .10:      cmp       ah, 'P'
           jne       .11
-          push      ds
-          push      cs
-          pop       ds
+          push      si
           call      showpwd
-          pop       ds
+          pop       si
           jmp short .3
 .11:      cmp       ah, 'Q'
           jne       .12
@@ -2370,21 +2366,15 @@ doprompt: mov       dx, eprompt
           jmp short .16
 .12:      cmp       ah, 'T'
           jne       .13
-          push      ds
-          push      cs
-          pop       ds
+          push      si
           call      wrtime
-          pop       ds
-          jmp short .3
+          pop       si
+          jmp       .3
 .13:      cmp       ah, 'V'
           jne       .14
-          push      ds
-          push      cs
-          pop       ds
           mov       dx, ecmdcm
           call      wrstr
-          pop       ds
-          jmp short 3
+          jmp       .3
 .14:      cmp       ah, '_'
           jne       .15
           mov       dl, 13
@@ -2397,6 +2387,20 @@ doprompt: mov       dx, eprompt
           call      chrcom
           jmp       .3
 .17:      ret
+
+c_exit:   call      uninit
+          mov       ax, 0x4C00          ; Also successful exit.
+          int       0x21
+
+newcmd:   call      doprompt
+          call      xgetlin
+          mov       si, linbuf+1
+          mov       di, 0x0080
+          mov       cx, di
+          rep movsb
+          cmp       byte [0081], 0x0D
+          je        newcmd
+          jmp       cmdloop
 
 linbuf:   dw        0x0000              ; FALL INTO
 buf:
