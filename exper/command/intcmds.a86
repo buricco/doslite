@@ -27,7 +27,7 @@
 ; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
 ; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-; This could be the start of an implementation of COMMAND.COM.
+; This is the start of an implementation of COMMAND.COM.
 ; Some of the implementations of commands are adapted from my previous attempt
 ; from 20 years ago, but I have rewritten everything into ASM.
 ;
@@ -39,11 +39,12 @@
 ; CHCP              Complete
 ; CLS               Complete
 ; COPY
-; CTTY              Implemented but not working
+; CTTY              Implemented but not working (might start working when it
+;                   becomes an actual internal command)
 ; DATE              Needs debugging
 ;   Supports the /T switch from Windows NT
 ; DEL, ERASE        Complete
-; DIR               Needs debugging
+; DIR               Needs debugging (done while half asleep).
 ; ECHO              Complete*
 ;   *The ON and OFF features are specific to batch files and are not supported
 ; LH, LOADHIGH
@@ -2321,7 +2322,11 @@ doprompt: mov       dx, eprompt
           jmp       .16
 .4:       cmp       ah, 'D'
           jne       .5
+          push      ds
+          push      cs
+          pop       ds
           call      wrdate
+          pop       ds
           jmp short .3
 .5:       cmp       ah, 'E'
           jne       .5
@@ -2333,8 +2338,12 @@ doprompt: mov       dx, eprompt
           jmp short .16
 .7:       cmp       ah, 'H'
           jne       .8
+          push      ds
+          push      cs
+          pop       ds
           mov       dx, ebs
           call      wrstr
+          pop       ds
           jmp short .3
 .8:       cmp       ah, 'L'
           jne       .9
@@ -2349,7 +2358,11 @@ doprompt: mov       dx, eprompt
           jmp short .16
 .10:      cmp       ah, 'P'
           jne       .11
+          push      ds
+          push      cs
+          pop       ds
           call      showpwd
+          pop       ds
           jmp short .3
 .11:      cmp       ah, 'Q'
           jne       .12
@@ -2357,12 +2370,20 @@ doprompt: mov       dx, eprompt
           jmp short .16
 .12:      cmp       ah, 'T'
           jne       .13
+          push      ds
+          push      cs
+          pop       ds
           call      wrtime
+          pop       ds
           jmp short .3
 .13:      cmp       ah, 'V'
           jne       .14
+          push      ds
+          push      cs
+          pop       ds
           mov       dx, ecmdcm
           call      wrstr
+          pop       ds
           jmp short 3
 .14:      cmp       ah, '_'
           jne       .15
