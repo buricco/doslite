@@ -5,11 +5,27 @@
 ; deal in the Software without restriction, including without limitation the 
 ; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
 ; sell copies of the Software, and to permit persons to whom the Software is 
-; furnished to do so.
+; furnished to do so, subject to the following conditions:
+;
+;   1. Redistributions of source code must retain the above copyright notice, 
+;      this list of conditions and the following disclaimers.
+;   2. Redistributions in binary form must reproduce the above copyright 
+;      notice, this list of conditions and the following disclaimers in the 
+;      documentation and/or other materials provided with the distribution.
+;   3. The name of the author may not be used to endorse or promote products 
+;      derived from this Software without specific prior written permission.
 ;
 ; THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
 ; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
 ; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+;
+; IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+; SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+; PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ; This could be the start of an implementation of COMMAND.COM.
 ; Some of the implementations of commands are adapted from my previous attempt
@@ -149,7 +165,7 @@ eren:     db        "Duplicate filename or file not found", 13, 10, "$"
 ermdir:   db        "Invalid path, not directory or directory not empty", 13, 10, "$"
 edelok:   db        ": delete (Y/N)? $"
 eall:     db        "Are you sure (Y/N)? $"
-epwd:     db        "Current drive is no longer valid$"
+epwd:     db        "Current drive is no longer valid", 0
 ecurdate: db        "Current date is $"
 ecurtime: db        "Current time is $"
 enewdate: db        "Enter new date $"
@@ -188,6 +204,10 @@ eswitch:  db        "Invalid switch - /"
 xswitch:  db        0
 ecrlf:    db        13, 10, "$"
 eansi:    db        27, "[2J$"
+eprompt:  db        "PROMPT", 0
+edefpmpt: db        "$P$G", 0
+ecmdcm:   db        "Litecom$"
+ebs:      db        8, ' ', 8, '$'
 
 maxcol:   db        79                  ; Must be in this order
 maxrow:   db        24
@@ -673,7 +693,7 @@ mosan:    mov       ah, dl              ; Day of month sanity check
 
 timedisp: mov       dx, ecurtime
           call      wrstr
-          mov       ah, 0x2C
+wrtime:   mov       ah, 0x2C
           int       0x21
           mov       [datebuf], cx
           mov       [datebuf+2], dx
@@ -709,7 +729,7 @@ timedisp: mov       dx, ecurtime
 
 datedisp: mov       dx, ecurdate
           call      wrstr
-          mov       ah, 0x2A
+wrdate:   mov       ah, 0x2A
           int       0x21
           mov       [datebuf], cx
           mov       [datebuf+2], dx
@@ -919,10 +939,24 @@ c_cd:     cmp       byte [buf], 0       ; Null - get CWD on current drive
           mov       dx, epath
           jmp       scream
 .4:       mov       dx, epwd
-          call      wrstr
+          call      wrstrc
           mov       dx, ecrlf
           jmp       scream
 
+showpwd:  mov       ah, 0x19
+          int       0x21
+          add       al, 'A'
+          mov       [buf], al
+          mov       word [buf+1], ':\'
+          mov       ah, 0x47
+          xor       dl, dl
+          mov       si, buf+3
+          int       0x21
+          mov       dx, buf
+          jnc       .1
+          mov       dx, epwd
+.1:       jmp       wrstrc
+          
 c_rd:     call      argsan
           mov       dx, buf
           mov       ah, 0x3A
@@ -2109,21 +2143,21 @@ diryr:    mov       al, [ffblk+0x19]
 
 cvtdword: mov       si, dwbuffer        ; Long enough to hold "4294967295".
           mov       bx, 10              ; Decimal base.
-.1:       xchg      cx, ax          ;;; ; ====================================
-          xor       dx, dx         ;;;  ; This portion shamelessly lifted from
-          div       bx             ;;;  ; the Borland C runtimes.  (A basic
-          xchg      ax, cx         ;;;  ; 32-to-32 divide routine that spills
-          div       bx             ;;;  ; the remainder to an incrementing
-          mov       [si], dl       ;;;  ; buffer pointer.)
+.1:       xchg      cx, ax         ;;;; ; ====================================
+          xor       dx, dx        ;;;   ; This portion shamelessly lifted from
+          div       bx            ;;;   ; the Borland C runtimes.  (A basic
+          xchg      ax, cx        ;;;   ; 32-to-32 divide routine that spills
+          div       bx            ;;;   ; the remainder to an incrementing
+          mov       [si], dl      ;;;   ; buffer pointer.)
           inc       si            ;;;   ;
-          jcxz      .3            ;;;   ;
-          jmp short .1             ;;;  ;
-.2:       xor       dx, dx         ;;;  ;
-          div       bx             ;;;  ;
-          mov       [si], dl       ;;;  ;
-          inc       si             ;;;  ;
-.3:       or        ax, ax          ;;; ; Keep going until out of digits.
-          jnz       .2                  ; ======================================
+          jcxz      .3         ;;;;     ;
+          jmp short .1            ;;;   ;
+.2:       xor       dx, dx        ;;;   ;
+          div       bx            ;;;   ;
+          mov       [si], dl      ;;;   ;
+          inc       si            ;;;   ;
+.3:       or        ax, ax        ;;;   ; Keep going until out of digits.
+          jnz       .2             ;;;; ; ======================================
           xor       cl, cl              ; Right-justify the output.
           mov       dx, si              ; Work with copy of pointer to tail.
 .4:       cmp       dx, dwbuffer+10     ; How many spaces do we need?
@@ -2195,6 +2229,153 @@ cmdtab:   dw        c_break
           dw        0
 
 dateseqs: dw        emdy, edmy, eymd
+
+; These environment-related functions are not finished
+
+findenv:  xor       si, si
+          mov       ds, [0x002C]
+          ret
+prtenv:   call      findenv
+.1:       mov       ah, [si]
+          or        ah, ah              ; End of table?
+          jz        .4
+.2:       mov       dl, [si]
+          or        dl, dl              ; End of entry?
+          jz        .3
+          call      chrcom
+          inc       si
+          jmp short .2
+.3:       inc       si
+          mov       dl, 13              ; Still using DS, so no AH=9
+          call      chrcom
+          mov       dl, 10
+          call      chrcom
+          jmp short .1
+.4:       push      cs
+          pop       ds
+          ret
+getenv:   mov       di, dx
+          call      findenv
+.1:       mov       ah, [si]
+          or        ah, ah              ; End of table?
+          jz        .7
+.2:       mov       ah, [si]
+          mov       al, [di]
+          inc       si
+          inc       di
+          cmp       ah, al
+          je        .2
+          or        al, al              ; End of string
+          jne       .3
+          cmp       ah, '='             ; Separator
+          je        .5                  ; Match
+.3:       cmp       byte [si], 0        ; Tick up to end of string
+          je        .4
+          inc       si
+          jmp short .3
+.4:       mov       di, dx
+          jmp short .1                  ; Next string
+.5:       mov       si, parsbuf1
+          xchg      si, di
+.6:       mov       ah, [si]
+          mov       cs:[di], ah
+          inc       si
+          inc       di
+          or        ah, ah
+          jne       .6
+          push      cs
+          pop       ds
+          clc
+          ret
+.7:       push      cs
+          pop       ds
+          mov       byte [parsbuf1], 0
+          stc
+          ret
+
+doprompt: mov       dx, eprompt
+          call      getenv
+          mov       ah, [parsbuf1]
+          or        ah, ah
+          jnz       .2
+          mov       si, edefpmpt
+          mov       di, parsbuf1
+.1:       mov       ah, [si]
+          mov       [di], ah
+          inc       si
+          inc       di
+          or        ah, ah
+          jnz       .1
+.2:       mov       si, parsbuf1
+.3:       mov       ah, [si]
+          inc       si
+          or        ah, ah
+          jz        .17
+          cmp       ah, '$'
+          jne       .16
+          mov       ah, [si]
+          call      smash
+          cmp       ah, 'B'
+          jne       .4
+          mov       ah, '|'
+          jmp       .16
+.4:       cmp       ah, 'D'
+          jne       .5
+          call      wrdate
+          jmp short .3
+.5:       cmp       ah, 'E'
+          jne       .5
+          mov       ah, 0x1A
+          jmp short .16
+.6:       cmp       ah, 'G'
+          jne       .7
+          mov       ah, '>'
+          jmp short .16
+.7:       cmp       ah, 'H'
+          jne       .8
+          mov       dx, ebs
+          call      wrstr
+          jmp short .3
+.8:       cmp       ah, 'L'
+          jne       .9
+          mov       ah, '<'
+          jmp short .16
+.9:       cmp       ah, 'N'
+          jne       .10
+          mov       ah, 0x19
+          int       0x21
+          mov       dl, al
+          add       dl, 'A'
+          jmp short .16
+.10:      cmp       ah, 'P'
+          jne       .11
+          call      showpwd
+          jmp short .3
+.11:      cmp       ah, 'Q'
+          jne       .12
+          mov       ah, '='
+          jmp short .16
+.12:      cmp       ah, 'T'
+          jne       .13
+          call      wrtime
+          jmp short .3
+.13:      cmp       ah, 'V'
+          jne       .14
+          mov       dx, ecmdcm
+          call      wrstr
+          jmp short 3
+.14:      cmp       ah, '_'
+          jne       .15
+          mov       dl, 13
+          call      chrcom
+          mov       dl, 10
+          jmp short .16
+.15:      cmp       ah, '$'
+          jne       .3
+.16:      mov       dl, ah
+          call      chrcom
+          jmp       .3
+.17:      ret
 
 linbuf:   dw        0x0000              ; FALL INTO
 buf:
