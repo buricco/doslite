@@ -27,7 +27,7 @@
 ; DATE              Needs debugging
 ;   Supports the /T switch from Windows NT
 ; DEL, ERASE        Complete
-; DIR
+; DIR               Needs debugging
 ; ECHO              Complete*
 ;   *The ON and OFF features are specific to batch files and are not supported
 ; LH, LOADHIGH
@@ -84,6 +84,11 @@
 ; As for any other commands, they are tied too deep into the internal state of 
 ; COMMAND.COM to worry about until more of the scaffolding is set up (e.g., 
 ; the half-written INT24 handler)...
+
+DIR_B     equ       0x01                ; Bare
+DIR_L     equ       0x02                ; Lowercase
+DIR_P     equ       0x04                ; Page - not implemented yet
+DIR_W     equ       0x08                ; Wide
 
           cpu       8086
           org       0x0100
@@ -172,6 +177,10 @@ volblk:   db        "A:\*.*", 0
 mvolume:  db        13, 10, " Volume in drive $"
 mnolabel: db        " has no label", 13, 10, "$"
 mvolser:  db        " Volume Serial Number is $"
+mdirof:   db        " Directory of $"
+edir:     db        "  <DIR>   $"
+efiles:   db        " file(s) $"
+ebfree:   db        " bytes free", 13, 10, "$"
 namtank:  db        "           ", 0
 epause:   db        "Press any key to continue . . . $"
 edays:    db        "Sun$Mon$Tue$Wed$Thu$Fri$Sat$"
@@ -182,6 +191,7 @@ eansi:    db        27, "[2J$"
 
 maxcol:   db        79                  ; Must be in this order
 maxrow:   db        24
+dirdrv:   db        0x00
 mediaid:  dw        0x0000
 serlo:    dw        0x0000
 serhi:    dw        0x0000
@@ -191,16 +201,19 @@ osmajor:  db        0x00
 ffblk:    times 128 db 0x00
 fin       equ       ffblk+0x001E
 drvchk:   db        0x00
+dirmode:                                ; SAME AS
 verr:                                   ; SAME AS
 eraq:     db        0x00
 eargflag: db        0x00
 arifflag: db        0x00
 cmdname:  db        9 dup 0x00
 tank:     dw        0x0000
+tally:    dw        0x0000
 inword:   dw        0x0000
 datebuf:  db        4 dup 0x00
 numbuf:   db        6 dup 0x00
 i18nbuf:  db        34 dup 0x00
+dwbuffer: db        10 dup 0x00         ; Buffer for translating double-words
 old24:    dd        0x00000000
 
 killspc:  cmp       byte [si], 0
@@ -220,25 +233,39 @@ smash:    cmp       ah, 'a'             ; Smash lowercase to uppercase.
           and       ah, 0x5F
 .1:       ret
 
+unsmash:  cmp       ah, 'A'             ; Smash uppercase to lowercase.
+          jb        .1
+          cmp       ah, 'Z'
+          ja        .1
+          or        ah, 0x20
+.1:       ret
+
 ; Append "\*.*" if si points to the name of a directory 
 ; (useful for DEL and DIR).
 
-starstar: push      si                  ; Save pointer
+starstar: cmp       byte [si], 0        ; Nothing specified? (DIR only)
+          jne       .1
+          mov       word [si], '*.'
+          add       si, 2
+          mov       word [si], '*'
+          sub       si, 2
+          ret
+.1:       push      si                  ; Save pointer
           mov       dx, si              ; Get attributes
           mov       ax, 0x4300
           int       0x21
           pop       si                  ; Restore pointer
-          jc        .1                  ; Just return on fail
+          jc        .2                  ; Just return on fail
           and       cl, 0x10            ; If not directory, just return
-          jnz       .2
-.1:       ret
-.2:       push      si                  ; Save pointer
-.3:       mov       ah, [si]
+          jnz       .3
+.2:       ret
+.3:       push      si                  ; Save pointer
+.4:       mov       ah, [si]
           or        ah, ah              ; Find NUL terminator
-          jz        .4
+          jz        .5
           inc       si
-          jmp short .3
-.4:       mov       word [si], '\*'     ; Add "\*.*" at the end
+          jmp short .4
+.5:       mov       word [si], '\*'     ; Add "\*.*" at the end
           add       si, 2
           mov       word [si], '.*'
           add       si, 2
@@ -518,6 +545,8 @@ selcmd:   mov       bx, cmdtab
           jmp short .1
 .6:       jmp       [bx]
 
+space:    mov       dl, ' '
+          jmp short chrcom
 zero:     mov       dl, '0'
           jmp short chrcom
 colon:    mov       dl, ':'
@@ -1285,7 +1314,7 @@ c_del:    mov       byte [eraq], 0      ; Set defaults
           mov       [di], ah            ; Store
           inc       si                  ; Adjust pointers
           inc       di
-          cmp       si, 0x0100          ; End of buffer
+          cmp       si, buf+128         ; End of buffer
           jne       .1
           jmp short .6
 .5:       call      killspc             ; Mark we have a parameter alreaady
@@ -1439,7 +1468,12 @@ c_vol:    cmp       byte [buf], 0
 .2:       mov       ah, 0x19            ; GETDISK
           int       0x21
           add       al, 'A'
-.3:       mov       [volblk], al
+.3:       mov       [dirdrv], al
+          sub       byte [dirdrv], 0x40
+          call      volcmn
+          jmp       c_rem
+
+volcmn:   mov       [volblk], al
           mov       dx, mvolume
           call      wrstr
           mov       ah, 0x02            ; PUTCHAR
@@ -1739,6 +1773,375 @@ c_ren:    mov       si, buf
 noren:    mov       dx, eren
           jmp       scream
 
+c_dir:    mov       byte [dirmode], 0   ; Set defaults
+          mov       byte [eargflag], 0
+          mov       word [tally], 0
+          mov       si, buf             ; Command line buffer
+          mov       di, parsbuf1
+          call      killspc
+          mov       byte [dirdrv], 0
+          mov       ax, [si]
+          cmp       ah, ':'
+          jne       .1
+          and       al, 0x1F
+          mov       [dirdrv], al
+.1:       mov       ah, [si]
+          cmp       ah, '/'             ; Switch?
+          jne       .3                  ; No, skip
+          mov       ah, [si+1]
+          call      smash               ; Force uppercase
+          mov       al, DIR_B
+          cmp       ah, 'B'
+          je        .2
+          mov       al, DIR_L
+          cmp       ah, 'L'
+          je        .2
+          mov       al, DIR_P
+          cmp       ah, 'P'
+          je        .2
+          mov       al, DIR_W
+          cmp       ah, 'W'
+          je        .2
+          mov       [xswitch], ah       ; Set up message
+          mov       dx, eswitch         ; "Invalid switch"
+          jmp       scream
+.2:       or        [dirmode], al       ; Set prompt flag
+          add       si, 2               ; Skip over it
+          call      killspc
+          cmp       di, parsbuf1        ; Was there anything typed?
+          je        .1
+          mov       byte [eargflag], 0xFF
+          jmp short .1
+.3:       cmp       ah, ' '             ; End of parameter
+          je        .5
+          cmp       ah, 0x09
+          je        .5
+          or        ah, ah              ; End of line
+          je        .6
+          cmp       byte [eargflag], 0xFF
+          jne       .4                  ; OK to copy char
+          mov       dx, eargs           ; "Too many arguments"
+          jmp       scream
+.4:       call      smash               ; Force uppercase
+          mov       [di], ah            ; Store
+          inc       si                  ; Adjust pointers
+          inc       di
+          cmp       si, 0x0100          ; End of buffer
+          jne       .1
+          jmp short .6
+.5:       call      killspc             ; Mark we have a parameter alreaady
+          mov       byte [eargflag], 0xFF
+          jmp short .1
+.6:       mov       byte [di], 0        ; Add a NUL terminator
+          inc       di
+          mov       si, parsbuf1
+          call      starstar
+.7:       cmp       byte [si], 0        ; Get basename
+          je        .8
+          inc       si
+          jmp short .7
+.8:       dec       si
+          cmp       byte [si], ':'      ; Drive separator?
+          je        .9                  ; Yes, done
+          cmp       byte [si], '\'      ; Path separator?
+          je        .9                  ; Yes, done
+          cmp       si, parsbuf1        ; Beginning of buffer?
+          jne       .8                  ; No, keep going
+          dec       si
+.9:       inc       si
+          test      byte [dirmode], DIR_B
+          jnz       .10
+          call      dirhdr
+.10:      mov       dx, ffblk
+          mov       ah, 0x1A            ; SETDTA
+          mov       cx, 0x0010          ; +DIR
+          int       0x21
+          mov       dx, parsbuf1
+          mov       ah, 0x4E            ; FINDFIRST
+          int       0x21
+          jnc       .15
+.11:      cmp       al, 0x02
+          je        .12
+          cmp       al, 0x12
+          jne       .13
+.12:      mov       dx, e404
+          jmp short .14
+.13:      mov       dx, epath
+.14:      jmp       scream
+.15:      test      byte [dirmode], DIR_L
+          jz        .17
+          mov       si, fin
+.16:      mov       ah, [si]            ; /L - lowercase
+          or        ah, ah
+          jz        .17
+          call      unsmash
+          mov       [si], ah
+          inc       si
+          jmp short .16
+.17:      test      byte [dirmode], DIR_B
+          jz        .18                 ; /B - bare
+          mov       dx, fin
+          call      wrstrc
+          mov       dx, ecrlf
+          call      wrstr
+          jmp       .34
+.18:      inc       word [tally]
+          test      byte [dirmode], DIR_W
+          jz        .22                 ; /W - wide
+          mov       dl, ' '
+          test      byte [ffblk+0x15], 0x10
+          jz        .19                 ; Not a directory
+          mov       dl, '\'
+.19:      mov       ah, 0x02
+          int       0x21
+          mov       dx, fin
+          call      wrstrc
+          mov       bl, 15              ; Field size
+          mov       di, fin
+.20:      cmp       byte [di], 0
+          je        .21
+          inc       di
+          dec       bl
+          jmp short .20
+.21:      call      space
+          dec       bl
+          jnz       .21
+          jmp       .34
+.22:      mov       si, fin
+          mov       di, parsbuf2
+          mov       ax, 0x2900          ; PARSFNM
+          int       0x21
+          mov       si, parsbuf2+1
+          mov       di, parsbuf2
+          mov       cl, 8
+.23:      mov       ah, [si]            ; Move filename buffer back and add
+          mov       [di], ah            ; ' ' separator and '$' terminator
+          inc       si
+          inc       di
+          dec       cl
+          jnz       .23
+          mov       byte [si-1], ' '
+          mov       byte [si+3], '$'
+          mov       dx, parsbuf2
+          call      wrstr
+          call      space
+          test      byte [ffblk+0x15], 0x10
+          jz        .24                 ; Not a directory
+          mov       dx, edir
+          call      wrstr
+          jmp short .25
+.24:      mov       ax, [ffblk+0x1A]
+          mov       cx, [ffblk+0x1C]
+          call      cvtdword
+.25:      call      space
+          call      space
+          mov       ax, [ffblk+0x16]    ; No timestamp?
+          or        ax, ax
+          jnz       .26
+          mov       ax, [ffblk+0x18]
+          or        ax, ax
+          jnz       .26
+          jmp       .33
+.26:      mov       dx, i18nbuf         ; What order to write date in?
+          mov       ax, 0x3800
+          int       0x21
+          mov       ah, [i18nbuf]
+          cmp       ah, 1               ; 0=MDY
+          je        .27                 ; 1=DMY
+          ja        .29                 ; 2=YMD
+          call      dirmo
+          mov       dl, [i18nbuf+0x0B]
+          call      chrcom
+          call      dirdy
+          jmp short .28
+.27:      call      dirdy
+          mov       dl, [i18nbuf+0x0B]
+          call      chrcom
+          call      dirmo
+.28:      mov       dl, [i18nbuf+0x0B]
+          call      chrcom
+          call      diryr
+          jmp short .30
+.29:      call      diryr
+          mov       dl, [i18nbuf+0x0B]
+          call      chrcom
+          call      dirmo
+          mov       dl, [i18nbuf+0x0B]
+          call      chrcom
+          call      dirdy
+.30:      call      space
+          mov       ax, [ffblk+0x16]
+          or        ax, ax
+          jz        .33
+          mov       al, ah
+          xor       ah, ah
+          mov       cl, 3
+          shr       al, cl
+          cmp       al, 9
+          ja        .31
+          push      ax
+          call      zero
+          pop       ax
+.31:      call      wrnum
+          mov       dl, ':'
+          call      chrcom
+          mov       ax, [ffblk+0x16]
+          mov       cl, 5
+          shr       ax, cl
+          and       al, 0x1F
+          xor       ah, ah
+          cmp       al, 9
+          ja        .32
+          push      ax
+          call      zero
+          pop       ax
+.32:      call      wrnum
+.33:      mov       dx, ecrlf
+          call      wrstr
+.34:      mov       ah, 0x4F
+          int       0x21
+          jnc       .15
+          cmp       al, 0x12
+          jne       .11
+          test      byte [dirmode], DIR_B
+          jnz       .42                 ; No footer
+          test      byte [dirmode], DIR_W
+          jz        .35
+          mov       ax, [tally]
+          xor       dx, dx
+          mov       bx, 5
+          div       bx
+          or        ax, ax
+          jz        .35
+          mov       dx, ecrlf
+          call      wrstr
+.35:      mov       ax, [tally]
+          mov       bl, 8
+          cmp       ax, 10
+          jb        .36
+          dec       bl
+.36:      cmp       ax, 100
+          jb        .37
+          dec       bl
+.37:      cmp       ax, 1000
+          jb        .38
+          dec       bl
+.38:      call      space
+          dec       bl
+          jnz       .38
+          mov       ax, [tally]
+          call      wrnum
+          mov       dx, efiles
+          call      wrstr
+          mov       dl, [dirdrv]
+          mov       ah, 0x36            ; GETFREE
+          int       0x21
+          xor       dx, dx              ; AX*BX = free sectors
+          mul       bx
+.39:      test      cx, 0x0001          ; CX will be a power of two
+          jnz       .41
+          clc
+          shr       cx, 1               ; Divide by two
+          shl       dx, 1               ; Multiply by two
+          test      ax, 0x8000
+          jz        .40
+          clc
+          or        dx, 0x0001
+.40:      shl       ax, 1
+          jmp short .39
+.41:      mov       cx, dx
+          call      cvtdword
+          mov       dx, ebfree
+          call      wrstr
+.42:      jmp       c_rem
+
+dirhdr:   mov       ah, [dirdrv]
+          or        ah, ah
+          jz        .1
+          mov       ah, 0x19            ; GETDISK
+          inc       al
+.1:       or        al, 'A'
+          call      volcmn
+          mov       dx, mdirof
+          call      wrstr
+          mov       dx, parsbuf1
+          call      wrstrc
+          mov       dx, ecrlf
+          call      wrstr
+          mov       dx, ecrlf
+          jmp       wrstr
+
+dirdy:    mov       al, [ffblk+0x18]
+          and       al, 0x1F
+          cmp       al, 9
+          jae       .1
+          push      ax
+          call      zero
+          pop       ax
+.1:       xor       ah, ah
+          jmp       wrnum
+dirmo:    mov       al, [ffblk+0x18]
+          mov       cl, 5
+          shr       al, cl
+          and       al, 0x07
+          test      byte [ffblk+0x19], 0x01
+          jz        .1
+          or        al, 0x08
+.1:       cmp       al, 9
+          ja        .2
+          push      ax
+          call      zero
+          pop       ax
+.2:       xor       ah, ah
+          jmp       wrnum
+diryr:    mov       al, [ffblk+0x19]
+          shr       al, 1
+          xor       ah, ah
+          cmp       ax, 20
+          jae       .1
+          add       ax, 80
+          jmp short .2
+.1:       sub       ax, 20
+.2:       jmp       wrnum
+
+; Output a double-word right-justified in ASCII.  The bit to convert the
+; double-word to individual base-10 digits was mooched from Borland C.
+
+cvtdword: mov       si, dwbuffer        ; Long enough to hold "4294967295".
+          mov       bx, 10              ; Decimal base.
+.1:       xchg      cx, ax          ;;; ; ====================================
+          xor       dx, dx         ;;;  ; This portion shamelessly lifted from
+          div       bx             ;;;  ; the Borland C runtimes.  (A basic
+          xchg      ax, cx         ;;;  ; 32-to-32 divide routine that spills
+          div       bx             ;;;  ; the remainder to an incrementing
+          mov       [si], dl       ;;;  ; buffer pointer.)
+          inc       si            ;;;   ;
+          jcxz      .3            ;;;   ;
+          jmp short .1             ;;;  ;
+.2:       xor       dx, dx         ;;;  ;
+          div       bx             ;;;  ;
+          mov       [si], dl       ;;;  ;
+          inc       si             ;;;  ;
+.3:       or        ax, ax          ;;; ; Keep going until out of digits.
+          jnz       .2                  ; ======================================
+          xor       cl, cl              ; Right-justify the output.
+          mov       dx, si              ; Work with copy of pointer to tail.
+.4:       cmp       dx, dwbuffer+10     ; How many spaces do we need?
+          jae       .5                  ; End of buffer - we're outtie
+          inc       dx                  ; Next byte
+          inc       cl                  ; Tick up
+          jmp short .4                  ; Go back, Jack, and do it again
+.5:       call      space               ; Print that many.
+          dec       cl                  ; Tick down
+          jnz       .5                  ; Go back, Jack, and do it again
+.6:       dec       si                  ; Move back to next digit and get it
+          mov       dl, [si]            ;   (the Borland code stores backward)
+          or        dl, 0x30            ; Turn it into an ASCII digit
+          call      chrcom              ; And print it via MS-DOS
+          cmp       si, dwbuffer        ; Hit the top yet?
+          ja        .6                  ; Nope, keep going.
+          ret                           ; We're outtie
+
 cmdtab:   dw        c_break
           db        "BREAK", 0
           dw        c_cd
@@ -1755,6 +2158,8 @@ cmdtab:   dw        c_break
           db        "DATE", 0
           dw        c_del
           db        "DEL", 0
+          dw        c_dir
+          db        "DIR", 0
           dw        c_echo
           db        "ECHO", 0
           dw        c_del
