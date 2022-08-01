@@ -49,6 +49,32 @@ typedef unsigned char  byte;
 typedef unsigned short word;
 typedef unsigned long  dword;
 
+static const char *e_dos      = "Incorrect DOS version\n",
+                  *e_arg      = "Invalid parameter\n",
+                  *e_args     = "Too many parameters\n",
+                  *e_effed    = "Memory arena trashed\n",
+                  *e_topram   = "%10lu bytes total conventional memory\n",
+                  *e_dosram   = "%10lu bytes available to DOS\n",
+                  *e_bigexe   = "%10lu largest executable program size\n",
+                  *e_emstotal = "%10lu bytes total EMS memory\n",
+                  *e_emsfree  = "%10lu bytes free EMS memory\n",
+                  *e_nonxms   = "%10lu bytes available contiguous extended memory\n",
+                  *e_xmsfree  = "%10lu bytes available XMS memory\n",
+                  *e_dosinhma = "           DOS is resident in the High Memory Area\n",
+#ifdef HELP
+                  *e_help     =
+"Displays the amount of used and free memory in your system.\r\n\r\n"
+"MEM [/PROGRAM | /DEBUG | /CLASSIFY]\r\n\r\n"
+"  /PROGRAM or /P   Displays status of programs currently loaded in memory.\r\n"
+"  /DEBUG or /D     Displays status of programs, internal drivers, and other\r\n"
+"                   information.\r\n",
+#endif
+                  *e_prghdr   = "\n"
+                                "  Address       Name        Size\n"
+                                "  -------     --------     ------\n",
+                  *e_blkfree  = " -Free-",
+                  *prtgrd     = "%s";
+
 byte mode;
 
 void far *farptr (word segment, word offset)
@@ -104,26 +130,6 @@ void mem_main (void)
  
  if (emsfound)
  {
-#if 0 /* this hangs DOSBOX */
-  /* Bug in MS-DOS 6.0's EMM386: make sure EMM386 is active */
-  _asm mov ax, 0xFFA5;         /* ISEMM386 */
-  _asm int 0x67;
-  _asm mov lo, ax;
-  if ((lo==0x845A)||(lo==0x84A5))
-  {
-   _asm mov lo, cx;
-   _asm mov hi, bx;
-   memmgr=farptr(hi, lo);
-   if (memmgr)
-   {
-    _asm xor ah, ah;
-    memmgr();
-    _asm mov emsfound, al;
-    emsfound=!(emsfound&0x01);
-   }
-  }
-#endif
-
   _asm mov ah, 0x42;
   _asm int 0x67;
   _asm mov chaindirty, ah;    /* 0=OK */
@@ -146,7 +152,7 @@ void mem_main (void)
  _asm lahf;
  _asm mov chaindirty, ah;
  _asm pop es;
- if (chaindirty&1)
+ if ((chaindirty&1)||(kb>=640))
   realkb=kb;
  else
   realkb=kb+(*((byte far *)farptr(ebdaseg, 0)));
@@ -191,9 +197,7 @@ void mem_main (void)
     _asm mov xmsfree, ax;
    }
    else
-   {
     xmsmem=xmsfree=0;
-   }
   }
  }
  
@@ -205,9 +209,7 @@ void mem_main (void)
   hidos=(hidos&0x10)?0xFF:0x00;
  }
  else
- {
   hidos=0;
- }
  
  _asm mov ourpsp, cs;
  
@@ -223,9 +225,7 @@ void mem_main (void)
  chaindirty=curchain=0;
 
  if (mode)
-  printf ("\n"
-          "  Address       Name        Size\n"
-          "  -------     --------     ------\n"); 
+  printf (prtgrd, e_prghdr); 
 
  while (1)
  {
@@ -246,15 +246,11 @@ void mem_main (void)
  
   if ((mz!='M')&&(mz!='Z'))
   {
-   fprintf (stderr, "Memory arena trashed\n");
+   fprintf (stderr, prtgrd, e_effed);   /* "Memory arena trashed" */
    exit(1);
   }
   memset(block,0,9);
-  if (_osmajor<4)
-  {
-
-  }
-  else
+  if (_osmajor>=4)
   {
    byte i;
    
@@ -278,7 +274,7 @@ void mem_main (void)
    isfree=1;
    chains[curchain]+=mempara;
    chains[curchain]++;
-   strcpy(block, " -Free-");
+   strcpy(block, e_blkfree);
   }
   else
   {
@@ -365,28 +361,26 @@ void mem_main (void)
  
  /* Summary */
  
- printf ("\n"
-         "%10lu bytes total conventional memory\n", ((dword) realkb)<<10);
- printf ("%10lu bytes available to DOS\n", ((dword) kb)<<10);
- printf ("%10lu largest executable program size\n", biggest);
+ printf ("\n");
+ printf (e_topram, ((dword) realkb)<<10);         /* # bytes total conventional memory */
+ printf (e_dosram, ((dword) kb)<<10);             /* # bytes available to DOS */
+ printf (e_bigexe, biggest);                      /* # largest executable program size */
  
  if (emsfound)
  {
-  printf ("%10lu bytes total EMS memory\n", ((dword) emsmem)<<14);
-  printf ("%10lu bytes free EMS memory\n", ((dword) emsfree)<<14);
+  printf (e_emstotal, ((dword) emsmem)<<14);      /* # bytes total EMS memory */
+  printf (e_emsfree, ((dword) emsfree)<<14);      /* # bytes free EMS memory */
  }
  
  if (int15mem||probefurther)
  {
   /* XXX: if int15 has been diddled, how do we get the old value? */
-  printf ("%10lu bytes available contiguous extended memory\n", ((dword) int15mem)<<10);
+  printf (e_nonxms, ((dword) int15mem)<<10);      /* # bytes avail. contig. ext. memory */
   if (xmsmem)
-  {
-   printf ("%10lu bytes available XMS memory\n", ((dword) xmsfree)<<10);
-  }
+   printf (e_xmsfree, ((dword) xmsfree)<<10);     /* # bytes avail. XMS memory */
  }
  if (hidos)
-  printf ("           DOS is resident in the High Memory Area\n");
+  printf (prtgrd, e_dosinhma);
 }
 
 char *getswitch (char *cl)
@@ -395,13 +389,7 @@ char *getswitch (char *cl)
 #ifdef HELP
  if (!strnicmp(cl, "/?", 2))
  {
-  printf (
-"Displays the amount of used and free memory in your system.\r\n\r\n"
-"MEM [/PROGRAM | /DEBUG | /CLASSIFY]\r\n\r\n"
-"  /PROGRAM or /P   Displays status of programs currently loaded in memory.\r\n"
-"  /DEBUG or /D     Displays status of programs, internal drivers, and other\r\n"
-"                   information.\r\n"
-  );
+  printf (prtgrd, e_help);
   exit(0);
  }
 #endif
@@ -436,7 +424,7 @@ int main (int argc, char **argv)
  
  if (dosver<0x030A)
  {
-  fprintf (stderr, "Incorrect DOS version\n");
+  fprintf (stderr, prtgrd, e_dos);      /* "Incorrect DOS version" */
   return 1;
  }
  
@@ -449,12 +437,12 @@ int main (int argc, char **argv)
  cl=getswitch(cl);
  if (!cl)
  {
-  fprintf (stderr, "Invalid parameter\n");
+  fprintf (stderr, prtgrd, e_arg);      /* "Invalid parameter" */
   return 1;
  }
  if (*cl!='\r')
  {
-  fprintf (stderr, "Too many parameters\n");
+  fprintf (stderr, prtgrd, e_args);     /* "Too many parameters" */
   return 1;
  }
  
@@ -462,3 +450,4 @@ int main (int argc, char **argv)
  
  return 0;
 }
+
