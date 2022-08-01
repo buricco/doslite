@@ -172,6 +172,15 @@ ascii:    push      cx                  ; Save byte count
           mov       ax,si               ; Current dump address
           mov       si,dx               ; ASCII dump address
           sub       ax,dx               ; AX=length of ASCII dump
+          mov       cx,si               ; get starting point
+          dec       cx
+          and       cx,0fh
+          inc       cx
+          and       cx,0fh
+          add       cx,3                ; we have the correct number to tab
+          push      ax                  ; save count
+          call      tab
+          pop       cx                  ; get count back
 ascdmp:   lodsb                         ; Get ASCII byte to dump
           and       al,7fh              ; ASCII uses 7 bits
           cmp       al,7fh              ; Don't try to print RUBOUT
