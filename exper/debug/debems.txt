@@ -1,0 +1,386 @@
+; ============================================================================
+;
+; Copyright (c) 1995-2003  Paul Vojta
+; Some modifications copyright 2022 S. V. Nickolas
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy
+; of this software and associated documentation files (the "Software"), to
+; deal in the Software without restriction, including without limitation the
+; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+; sell copies of the Software, and to permit persons to whom the Software is
+; furnished to do so, subject to the following conditions:
+;
+; The above copyright notice and this permission notice shall be included in
+; all copies or substantial portions of the Software.
+;
+; THE SOFTWARE IS PROVIDED AS IS, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+; FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+; FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+; IN THE SOFTWARE.
+;
+; ============================================================================
+
+; Notes from the modifier regarding this file:
+;
+; This is a SCRAP, not part of the current DEBUG source.
+;
+; I took it from FreeDOS DEBUG with the intention of trying to integrate it
+; into the MS-DOS 2.11 version rather than trying to on one hand reinvent the
+; wheel.  Certainly porting to WASM wouldn't be necessary - Japheth already
+; made sure of that - but I don't know the code well enough.  The structure
+; seems similar enough that it probably isn't too hard to get it working in
+; the original DEBUG tree.
+;
+; I haven't yet figured out how to match every function called to the MS-DOS
+; sources, and some of my approximations (scanb, gethx, geteol), I am NOT at
+; all sure these are correct!
+;
+; Also, I stuffed the strings in the code segment - that needs to be fixed.
+
+_ITEXT    segment
+
+;--- X commands - manipulate EMS memory.
+
+;--- XA - Allocate EMS.
+
+xa:       call      emschk
+          call      scanb
+          mov       cx, 4
+          call      gethx               ; get argument into DX
+          call      geteol              ; expect end of line here
+          mov       bx, dx
+          mov       ah,43h              ; allocate handle
+          and       bx, bx
+          jnz       @F
+          mov       ax, 5A00h           ; use the EMS 4.0 version to alloc 0 pages
+@@:       call      emscall
+          push      dx
+          mov       si, offset xaans
+          call      copystring
+          pop       ax
+          call      hexword
+          jmp       putsline            ; print string and return
+
+;--- XD - Deallocate EMS handle.
+
+xd:       call      emschk
+          call      scanb
+          mov       cx, 4
+          call      gethx               ; get argument into DX
+          call      geteol              ; expect end of line here
+          mov       ah, 45h             ; deallocate handle
+          call      emscall
+          push      dx
+          mov       si, offset xdans
+          call      copystring
+          pop       ax
+          call      hexword
+          jmp       putsline            ; print string and return
+
+;--- x main dispatcher
+
+x_cmd:    or        al, 0x20            ; convert to lowercase
+          cmp       al, 'a'
+          je        xa                  ; if XA command
+          cmp       al, 'd'
+          je        xd                  ; if XD command
+          cmp       al, 'r'
+          je        xr                  ; if XR command
+          cmp       al, 'm'
+          je        xm                  ; if XM command
+          cmp       al, 's'
+          je        xs                  ; if XS command
+          jmp       cmd_error
+
+;--- XR - Reallocate EMS handle.
+
+xr:       call      emschk
+          call      scanb
+          mov       cx, 4
+          call      gethx               ; get handle argument into DX
+          mov       bx,dx
+          call      scanb
+          mov       cx, 4
+          call      gethx               ; get count argument into DX
+          call      geteol              ; expect end of line here
+          xchg      bx,dx
+          mov       ah, 51h             ; reallocate handle
+          call      emscall
+          mov       si, offset xrans
+          call      copystring
+          jmp       putsline            ; print string and return
+
+;--- XM - Map EMS memory to physical page.
+
+xm:       call      emschk
+          call      scanb
+          mov       cx, 4
+          call      gethx               ; get logical page (FFFF means unmap)
+          mov       bx,dx               ; save it in BX
+          call      skipcomm0
+          call      getbyte             ; get physical page (DL)
+          push      dx
+          call      skipcomm0
+          mov       cx, 4
+          call      gethx               ; get handle into DX
+          call      geteol              ; expect end of line
+          pop       ax                  ; recover physical page into AL
+          push      ax
+          mov       ah,44h              ; function 5 - map memory
+          call      emscall
+          mov       si, offset xmans
+          call      copystring
+          mov       bp, di
+          mov       di, offset line_out + xmans_pos1
+          xchg      ax,bx              ; mov ax,bx
+          call      hexword
+          mov       di, offset line_out + xmans_pos2
+          pop       ax
+          call      hexbyte
+          mov       di, bp
+          jmp       putsline            ; print string and return
+
+;--- XS - Print EMS status.
+
+xs:       call      emschk
+          lodsb
+          call      geteol              ; no arguments allowed
+
+;   First print out the handles and handle sizes.  This can be done either
+;   by trying all possible handles or getting a handle table.
+;   The latter is preferable, if it fits in memory.
+
+          mov       ah,4bh              ; function 12 - get handle count
+          call      emscall
+          cmp       bx, (real_end-line_out)/4
+          jbe       xs3                 ; if we can do it by getting the table
+          xor       dx, dx              ; start handle
+nexthdl:  mov       ah, 4ch             ; function 13 - get handle pages
+          int       67h
+          cmp       ah, 83h
+          je        xs2                 ; if no such handle
+          or        ah, ah
+          jz        @F
+          jmp       ems_err             ; if other error
+@@:       xchg      ax, bx
+          call      hndlshow
+xs2:      inc       dl                  ; end of loop
+          jnz       nexthdl             ; if more to be done
+          jmp       xs5                 ; done with this part
+
+;--- Get the information in tabular form.
+
+xs3:      mov       ah, 4dh             ; function 14 - get all handle pages
+          mov       di, offset line_out
+          call      emscall
+          and       bx, bx              ; has returned no of entries in BX
+          jz        xs5
+          mov       si, di
+@@:       lodsw
+          xchg      ax, dx
+          lodsw
+          call      hndlshow
+          dec       bx
+          jnz       @B                  ; if more to go
+xs5:      mov       dx, offset crlf
+          call      int21ah9            ; print string
+
+;   Next print the mappable physical address array.
+;   The size of the array shouldn't be a problem.
+
+          mov       ax, 5800h           ; function 25 - get mappable phys. address array
+          mov       di, offset line_out ; address to put array
+          call      emscall
+          mov       dx, offset xsnopgs
+          jcxz      xs7                 ; NO mappable pages!
+          mov       si, di
+xs6:      push      cx
+          lodsw
+          mov       di, offset xsstr2b
+          call      hexword
+          lodsw
+          mov       di, offset xsstr2a
+          call      hexbyte
+          mov       dx, offset xsstr2
+          mov       cx, size_xsstr2
+          call      stdout              ; print string
+          pop       cx                  ; end of loop
+          test      cl, 1
+          jz        @F
+          mov       dx, offset crlf     ; blank line
+          call      int21ah9            ; print string
+@@:       loop      xs6
+          mov       dx, offset crlf     ; blank line
+xs7:
+          call      int21ah9            ; print string
+
+;--- Finally, print the cumulative totals.
+
+          mov       ah,42h              ; function 3 - get unallocated page count
+          call      emscall
+          mov       ax, dx              ; total pages available
+          sub       ax, bx              ; number of pages allocated
+          mov       bx, offset xsstrpg
+          call      sumshow             ; print the line
+          mov       ah, 4bh              ; function 12 - get handle count
+          call      emscall
+          push      bx
+
+;--- try EMS 4.0 function 5402h to get total number of handles
+
+          mov       ax, 5402h
+          int       67h                 ; don't use emscall, this function may fail!
+          mov       dx, bx
+          cmp       ah, 0
+          jz        @F
+          mov       dx, 0ffh            ; total number of handles
+@@:       pop       ax                  ; ax = number of handles allocated
+          mov       bx, offset xsstrhd
+          call      sumshow             ; print the line
+          ret                           ; done
+
+;--- Call EMS
+
+emscall:  int       67h
+          and       ah, ah              ; error?
+          js        ems_err
+          ret                           ; return if OK
+
+;--- ems error in AH
+
+ems_err:  mov       al, ah
+          cmp       al, 8bh
+          jg        ce2                 ; if out of range
+          cbw
+          mov       bx, ax
+          shl       bx, 1
+          mov       si, [emserrs+100h+bx]
+          or        si, si
+          jnz       ce3                 ; if there's a word there
+ce2:      mov       di, offset emserrxa
+          call      hexbyte
+          mov       si, offset emserrx
+ce3:      mov       di, offset line_out
+          call      copystring          ; si->di
+          call      putsline
+          jmp       cmdloop
+
+;--- Check for EMS
+
+emschk:   push      es
+          mov       ax, 3567h           ; get interrupt vector 67h
+          int       21h
+          mov       ax, es
+          pop       es
+          or        ax, bx
+          jz        echk2
+emschk2:  mov       ah, 46h             ; get version
+          call      emscall
+          and       ah, ah
+          jnz       echk2
+          ret
+echk2:    mov       si, offset emsnot
+          call      copystring
+          call      putsline
+          jmp       cmdloop
+
+;--- HNDLSHOW - Print XS line giving the handle and pages allocated.
+;
+;--- Entry   DX Handle
+;            AX Number of pages
+;
+;    Exit    Line printed
+;
+;    Uses    ax,cl,di.
+
+hndlshow: mov       di, offset xsstr1b
+          call      hexword
+          mov       ax, dx
+          mov       di, offset xsstr1a
+          call      hexword
+          push      dx
+          mov       dx, offset xsstr1
+          mov       cx, size_xsstr1
+          call      stdout
+          pop       dx
+          ret
+
+;--- SUMSHOW - Print summary line for XS command.
+;
+;---Entry    AX Number of xxxx's that have been used
+;            DX Total number of xxxx's
+;            BX Name of xxxx
+;
+;   Exit     String printed
+;
+;   Uses     AX, CX, DX, DI
+
+sumshow:  mov       di, offset line_out
+          call      trimhex
+          mov       si, offset xsstr3
+          call      copystring
+          xchg      ax, dx
+          call      trimhex
+          mov       si, offset xsstr3a
+          call      copystring
+          mov       si, bx
+          call      copystring
+          mov       si, offset xsstr3b
+          call      copystring
+          jmp       putsline
+
+;   TRIMHEX - Print word without leading zeroes.
+;
+;   Entry    AX Number to print
+;            DI Where to print it
+;
+;   Uses     AX, CX, DI.
+
+trimhex:  call      hexword
+          push      di
+          sub       di, 4               ; back up DI to start of word
+          mov       cx, 3
+          mov       al,'0'
+@@:       scasb
+          jne       @F                  ; return if not a '0'
+          mov       byte ptr [di-1], ' '
+          loop      @B
+@@:       pop       di
+          ret
+
+;--- strings used by XA, XD, XR and XM commands
+
+xaans:    db        'Handle created: ',0
+xdans:    db        'Handle deallocated: ',0
+xrans:    db        'Handle reallocated',0
+xmans:    db        'Logical page '
+xmans_pos1 equ $ - xmans
+          db        '____ mapped to physical page '
+xmans_pos2 equ $ - xmans
+          db        '__',0
+
+;--- strings used by XS command
+
+xsstr1:   db        'Handle '
+xsstr1a:  db        '____ has '
+xsstr1b:  db        '____ pages allocated',13,10
+size_xsstr1 equ $ - xsstr1
+
+xsstr2:   db        'phys. page '
+xsstr2a:  db        '__ = segment '
+xsstr2b:  db        '____  '
+size_xsstr2 equ $ - xsstr2
+
+xsstr3:   db        ' of a total ',0
+xsstr3a:  db        ' EMS ',0
+xsstrpg:  db        'pag',0
+xsstrhd:  db        'handl',0
+xsstr3b:  db        'es have been allocated',0
+
+xsnopgs:  db        'no mappable pages',13,10,13,10,'$'
+
+_ITEXT    ends
+          end
