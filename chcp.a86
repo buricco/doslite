@@ -1,0 +1,147 @@
+; Copyright 2001, 2002, 2003, 2022 S. V. Nickolas.
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy 
+; of this software and associated documentation files (the "Software"), to 
+; deal in the Software without restriction, including without limitation the 
+; rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
+; sell copies of the Software, and to permit persons to whom the Software is 
+; furnished to do so, subject to the following condition:  The above copyright
+; notice and this permission notice shall be included in all copies or
+; substantial portions of this Software.
+;
+; THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
+; WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+;
+; IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+; SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+; PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+          cpu       8086
+          org       0x0100
+entry:    mov       ah, 0x30            ; No sense running on DOS pre-3.30
+          int       0x21
+          xchg      ah, al
+          cmp       ax, 0x031A
+          jae       okdos
+          mov       di, edos1
+          call      wrstrc
+          int       0x20
+okdos:    mov       si, 0x0081
+.1:       cmp       byte [si], ' '
+          je        .2
+          cmp       byte [si], 0x09
+          jne       .3
+.2:       inc       si
+          cmp       si, 0x0100
+          jb        .1
+.3:       mov       ah, [si]
+          cmp       ah, '/'             ; Switch?
+          je        .6                  ; Yes, skip forward to deal with it.
+          cmp       ah, 0x0D            ; CR - end of line
+          je        .10
+          cmp       ah, '0'             ; If not a digit, die screaming
+          jb        .4
+          cmp       ah, '9'
+          ja        .4
+          and       ah, 0x0F            ; Mask off the ASCII
+          mov       bl, ah              ; Multiply existing value by 10 and
+          xor       bh, bh              ;   add our digit to it.
+          mov       ax, 10              ; DECIMAL
+          mul       word [codepage]
+          add       ax, bx
+          mov       [codepage], ax
+          inc       si                  ; Next char
+          jmp short .3
+.4:       mov       di, esyn            ; Syntax error, die screaming
+.5:       call      wrstrc
+          mov       ax, 0x4C01
+          int       0x21                ; EXIT CODE 1
+.6:       inc       si                  ; Start reading switch.
+.7:       mov       di, eswitch         ; "Invalid switch"
+          call      wrstrc
+          mov       si, bx
+.8:       mov       ah, [si]            ; Next char of switch
+          cmp       ah, ' '             ; Check for delimiters
+          je        .9                  ;   (space, tab, CR)
+          cmp       ah, 0x09
+          je        .9
+          cmp       ah, 0x0D
+          je        .9
+          mov       dl, ah              ; Output the character
+          mov       ah, 0x02
+          int       0x21
+          inc       si                  ; Keep going, until done
+          cmp       si, 0x0100
+          jb        .8
+.9:       mov       di, ecrlf           ; End with a newline.
+          jmp short .5
+
+; Arguments parsed, now execute the command.
+
+.10:      mov       bx, [codepage]
+          or        bx, bx
+          jnz       .12
+          mov       ax, 0x6601          ; GETCHCP
+          int       0x21
+          jc        .15
+          mov       di, eactive
+          call      wrstrc
+          mov       ax, bx
+          call      wrnum
+          mov       di, ecrlf
+          call      wrstrc
+.11:      mov       ax, 0x4C00
+          int       0x21                ; EXIT CODE 0
+.12:      mov       ax, 0x6602          ; SETCHCP
+          int       0x21
+          jnc       .11
+
+; Error handlers for the CHCP calls.
+
+          mov       ax, 0x1400          ; Is it because no NLSFUNC?
+          int       0x2F
+          inc       al
+          jz        .13                 ; No, NLSFUNC's there.
+          mov       di, enlsfunc
+          jmp short .5
+.13:      mov       di, esetcp
+.14:      jmp short .5
+.15:      mov       di, egetcp
+          jmp short .5
+
+wrnum:    mov       byte [numbuf+6], 0  ; Recycle the end of linbuf2.
+          mov       di, numbuf+5        ; (Only does an unsigned word.
+.1:       xor       dx, dx              ;  Output will be a C string.)
+          mov       bx, 10              ; DECIMAL
+          div       bx                  ; AX=(DX:AX)/BX; DX=(DX:AX)%BX
+          add       dl, '0'             ; Convert remainder to ASCII
+          mov       [di], dl            ; Write it into buffer
+          dec       di                  ; Step down
+          or        ax, ax              ; Anything left?
+          jnz       .1                  ; Yes, so keep going.
+          inc       di                  ; FALL INTO
+wrstrc:   mov       ah, 0x02            ; PUTCHAR
+          mov       dl, [di]
+          or        dl, dl              ; Null terminator?
+          jz        .1                  ; Yes, restore di and exit
+          int       0x21
+          inc       di
+          jmp short wrstrc
+.1:       ret
+
+codepage: dw        0x0000
+
+numbuf:   db        "00000", 0
+edos1:    db        "Incorrect DOS version", 13, 10, 0
+esyn:     db        "Invalid parameter", 13, 10, 0
+eswitch:  db        "Invalid switch - /", 0
+enlsfunc: db        "NLSFUNC not installed", 13, 10, 0
+eactive:  db        "Active code page: ", 0
+egetcp:   db        "Cannot retrieve code page", 13, 10, 0
+esetcp:   db        "Cannot set code page"        ; FALL INTO
+ecrlf:    db        13, 10, 0
