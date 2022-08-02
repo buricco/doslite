@@ -27,7 +27,10 @@
 ; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
 ; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-; Revision 1.1: 2002.0801 usotsuki
+; Revision 1.2: 2022.0802 usotsuki
+;               Wildcard support (if compiled with -DWILDCARD)
+;
+; Revision 1.1: 2022.0801 usotsuki
 ;               Added support for multiple filespecs.
 
 ; To note:
@@ -160,7 +163,11 @@ nextarg:  call      killspc             ; (I know I'm swapping DI/SI, sosumi.)
           cmp       ah, 0x0D            ; End of line.
           jne       .8
           mov       word [si], 0x0000
+%ifdef    WILDCARD
+.4:       call      wcproc
+%else
 .4:       call      dofind
+%endif
           mov       di, fname           ; Check first name?
           cmp       byte [di], 0
           je        done                ; No, done.
@@ -202,7 +209,7 @@ switch:   inc       di
           je        .3
           cmp       ah, 'I'             ; Smash case before searching
           je        .4
-%ifdef HELP
+%ifdef    HELP
           cmp       ah, '?'
           je        dohelp
 %endif
@@ -218,7 +225,7 @@ switch:   inc       di
 .4:       or        byte [mode], mode_i
 tonxt:    jmp       nextarg
 
-%ifdef HELP
+%ifdef    HELP
 dohelp:   mov       dx, ehelp
           call      wrstr
           jmp       die
@@ -261,9 +268,25 @@ dofind:   mov       ah, [fname]         ; Use an external file or stdin?
           or        ah, ah
           je        ready               ; Use stdin
           mov       ax, 0x3D00          ; Open external file
+%ifdef    WILDCARD
+          mov       dx, fnbuild
+%else
           mov       dx, fname
+%endif
           int       0x21
           jnc       .4                  ; Success
+          push      ax
+%ifdef    WILDCARD
+          mov       dx, fnbuild
+%else
+          mov       dx, fname
+%endif
+          call      wrstrc
+          mov       dx, ecolon
+          call      wrstr
+          pop       ax
+          cmp       al, 0x12
+          je        .1
           cmp       al, 0x02            ; Find error, die screaming
           je        .1
           cmp       al, 0x03
@@ -281,7 +304,11 @@ dofind:   mov       ah, [fname]         ; Use an external file or stdin?
 .4:       mov       [handle], ax        ; Save handle (defaults to stdin)
           mov       dx, eheader         ; Write header
           call      wrstr
+%ifdef    WILDCARD
+          mov       dx, fnbuild
+%else
           mov       dx, fname
+%endif
           call      wrstrc
           mov       ah, [mode]          ; Colon for /C; newline otherwise
           and       ah, mode_c
@@ -300,7 +327,11 @@ ready:    mov       ah, [mode]          ; If case insensitive search was
           call      smash
           mov       [di], ah
           inc       di
-          cmp       di, fname           ; End of buffer
+%ifdef    WILDCARD
+          cmp       di, fnbuild
+%else
+          cmp       di, fname
+%endif
           jb        .1
 .2:       mov       di, linbuf
 .3:       mov       ah, 0x3F            ; Get a block from the file.
@@ -419,6 +450,89 @@ search:   push      si                  ; Save the pointers for later.
           pop       si
           ret
 
+%ifdef    WILDCARD
+wcproc:   mov       si, fname           ; Find length of the filename
+          xor       bx, bx
+.1:       cmp       byte [si+bx], 0
+          je        .2
+          inc       bx
+          jmp short .1
+.2:       or        bx, bx              ; Null string - leave to dofind
+          jnz       .3
+          jmp       dofind
+.3:       mov       cx, bx
+          mov       di, wcpath
+          cld
+          repnz movsb
+.4:       dec       di                  ; Find the last dir/drive separator
+          cmp       di, wcpath
+          je        .6
+          cmp       byte [di], ':'
+          je        .5
+          cmp       byte [di], '\'
+          jne       .4
+.5:       inc       di
+.6:       mov       byte [di], 0        ; Zot out the basename
+          mov       dx, wcffblk
+          mov       ah, 0x1A            ; SETDTA
+          int       0x21
+          mov       ah, 0x4E            ; FINDFIRST
+          xor       cx, cx
+          mov       dx, fname
+          int       0x21
+          jc        .10
+.7:       mov       si, wcpath          ; Copy the found path
+          mov       di, fnbuild
+.8:       mov       ah, [si]
+          mov       [di], ah
+          inc       si
+          inc       di
+          or        ah, ah
+          jnz       .8
+          
+          dec       di
+          mov       si, wcffblk+0x1E    ; Copy found base filename
+.9:       mov       ah, [si]
+          mov       [di], ah
+          inc       si
+          inc       di
+          or        ah, ah
+          jnz       .9
+          call      dofind
+          mov       ah, 0x4F            ; FINDNEXT
+          int       0x21
+          jnc       .7
+          cmp       al, 0x12            ; Not an error, but out of files
+          je        .15
+          push      ax
+%ifdef    WILDCARD
+          mov       dx, fnbuild
+%else
+          mov       dx, fname
+%endif
+          call      wrstrc
+          mov       dx, ecolon
+          call      wrstr
+          pop       ax
+.10:      cmp       al, 0x12            ; "No more files" from findfirst
+          je        .11                 ;   = file not found
+          cmp       al, 0x02
+          je        .11
+          cmp       al, 0x03
+          je        .12
+          cmp       al, 0x05
+          je        .13
+          mov       di, ewut
+          jmp short .14
+.11:      mov       di, efile
+          jmp short .14
+.12:      mov       di, epath
+          jmp short .14
+.13:      mov       di, eaccess
+.14:      jmp       scream
+.15:      ret
+%endif
+
 ; edos1 is meant to FALL THROUGH into ecrlf1.
 
 edos1:    db        "Incorrect DOS version"
@@ -426,17 +540,17 @@ ecrlf1:   db        13, 10, "$"
 eheader:  db        13, 10, "---------- $"
 ecolon:   db        ": $"
 
-%ifdef HELP
+%ifdef    HELP
 ehelp:    db        "Searches for a text string in a file or files.", 13, 10
           db         13, 10
-          db        "FIND [/V] [/C] [/N] [/I] ", 34, "string", 34, " [[drive:][path]filename]", 13, 10, 13, 10
+          db        "FIND [/V] [/C] [/N] [/I] ", 34, "string", 34, " [[drive:][path]filename[ ...]]", 13, 10, 13, 10
           db        "  /V        Displays all lines NOT containing the specified string.", 13, 10
           db        "  /C        Displays only the count of lines containing the string.", 13, 10
           db        "  /N        Displays line numbers with the displayed lines.", 13, 10
           db        "  /I        Ignores the case of characters when searching for the string.", 13, 10
           db        '  "string"  Specifies the text string to find.', 13, 10
           db        "  [drive:][path]filename", 13, 10
-          db        "            Specifies a file to search.", 13, 10, 13, 10
+          db        "            Specifies a file or files to search.", 13, 10, 13, 10
           db        "If a pathname is not specified, FIND searches the text typed at the prompt", 13, 10
           db        "or piped from another command.", 13, 10, "$"
 %endif
@@ -466,7 +580,14 @@ handle    equ       mode+1              ; this serves as both a zero default
                                         ; and the handle to stdin
 string    equ       handle+2
 fname     equ       string+128
+%ifdef    WILDCARD
+wcpath    equ       fname+128
+wcffblk   equ       wcpath+64
+fnbuild   equ       wcffblk+80
+linbuf    equ       fnbuild+128
+%else
 linbuf    equ       fname+128
+%endif
 buffer    equ       linbuf+linbufsiz
 linbuf2   equ       buffer+bufsiz
 bssend    equ       linbuf2+linbufsiz
