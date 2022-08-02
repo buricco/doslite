@@ -27,6 +27,9 @@
 ; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
 ; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+; Revision 1.1: 2002.0801 usotsuki
+;               Added support for multiple filespecs.
+
 ; To note:
 ;   Exit should be as follows:
 ;     0 - Search was successful.
@@ -138,7 +141,8 @@ nextarg:  call      killspc             ; (I know I'm swapping DI/SI, sosumi.)
 .1:       mov       ah, [di]
           cmp       ah, 0x0D            ; End of line
           jne       .2
-          jmp       testargs
+          mov       word [si], 0x0000   ; Double NUL terminator
+          jmp short .4
 .2:       cmp       ah, '/'             ; Switch flag, can be anywhere except
           je        switch              ; inside the search argument
           cmp       ah, '"'             ; Search argument
@@ -148,22 +152,43 @@ nextarg:  call      killspc             ; (I know I'm swapping DI/SI, sosumi.)
           or        al, al              ; There isn't a search argument,
           je        noarg               ; so die screaming.
           mov       al, [fname]
-          or        al, al              ; We've already got a filename,
-          jne       xsarg               ; so die screaming.
           mov       si, fname           ; Copy the filename.
 .3:       mov       [si], ah
           inc       di
           inc       si
           mov       ah, [di]            ; NEEEXT!
           cmp       ah, 0x0D            ; End of line.
-          jne       .4
-          jmp       testargs
-.4:       call      smash
-          cmp       ah, ' '             ; In case there's switches afterward.
-          je        nextarg
+          jne       .8
+          mov       word [si], 0x0000
+.4:       call      dofind
+          mov       di, fname           ; Check first name?
+          cmp       byte [di], 0
+          je        done                ; No, done.
+          mov       si, di              ; Search for end of first filename
+.5:       inc       si
+          cmp       byte [si], 0
+          jne       .5
+          inc       si
+          cmp       byte [si], 0        ; Is there another?
+          je        done                ; No, done.
+          xor       bx, bx              ; Search for end of arg list
+.6:       inc       bx
+          cmp       word [si+bx], 0
+          jnz       .6
+          mov       cx, bx              ; Move back and try again
+          add       cx, 2
+          cld
+          rep movsb
+          jmp short .4
+
+.8:       call      smash
+          cmp       ah, ' '
+          je        .9
           cmp       ah, 0x09
-          je        nextarg
-          cmp       ah, '/'             ; Switch to switch mode.
+          jne       .10
+.9:       xor       ah, ah              ; NUL terminator
+          jmp short .3
+.10:      cmp       ah, '/'             ; Switch to switch mode.
           jne       .3                  ; FALL THROUGH
 switch:   inc       di
           mov       ah, [di]
@@ -199,6 +224,10 @@ dohelp:   mov       dx, ehelp
           jmp       die
 %endif
 
+done:     mov       ah, 0x4C
+          mov       al, [retval]
+          int       0x21
+
 quote:    mov       ah, [string]        ; Only one string permitted
           or        ah, ah
           jne       xsarg
@@ -228,7 +257,7 @@ quote:    mov       ah, [string]        ; Only one string permitted
 syn:      mov       di, esyn            ; Syntax error
 toscream: jmp       scream
 
-testargs: mov       ah, [fname]         ; Use an external file or stdin?
+dofind:   mov       ah, [fname]         ; Use an external file or stdin?
           or        ah, ah
           je        ready               ; Use stdin
           mov       ax, 0x3D00          ; Open external file
@@ -327,8 +356,10 @@ ready:    mov       ah, [mode]          ; If case insensitive search was
 .11:      mov       ax, [matches]       ; success?
           or        ax, ax
           je        .12                 ; failure; return 1
-          mov       ax, 0x4C00          ; success; return 0
-          int       0x21                ; EXIT
+          mov       bx, cs
+          mov       ds, bx
+          mov       es, bx
+          ret                           ; success
 .12:      mov       ax, 0x4C01
           int       0x21                ; EXIT
 
@@ -392,28 +423,21 @@ search:   push      si                  ; Save the pointers for later.
 
 edos1:    db        "Incorrect DOS version"
 ecrlf1:   db        13, 10, "$"
-eheader:  db        "---------- $"
+eheader:  db        13, 10, "---------- $"
 ecolon:   db        ": $"
 
 %ifdef HELP
 ehelp:    db        "Searches for a text string in a file or files.", 13, 10
           db         13, 10
-          db        'FIND [/V] [/C] [/N] [/I] "string"'
-          db         " [[drive:][path]filename[ ...]]", 13, 10, 13, 10
-          db        "  /V        Displays all lines NOT containing the"
-          db                   " specified string.", 13, 10
-          db        "  /C        Displays only the count of lines containing"
-          db                   " the string.", 13, 10
-          db        "  /N        Displays line numbers with the displayed"
-          db                   " lines.", 13, 10
-          db        "  /I        Ignores the case of characters when"
-          db                   " searching for the string.", 13, 10
+          db        "FIND [/V] [/C] [/N] [/I] ", 34, "string", 34, " [[drive:][path]filename]", 13, 10, 13, 10
+          db        "  /V        Displays all lines NOT containing the specified string.", 13, 10
+          db        "  /C        Displays only the count of lines containing the string.", 13, 10
+          db        "  /N        Displays line numbers with the displayed lines.", 13, 10
+          db        "  /I        Ignores the case of characters when searching for the string.", 13, 10
           db        '  "string"  Specifies the text string to find.', 13, 10
           db        "  [drive:][path]filename", 13, 10
-          db        "            Specifies a file or files to search.", 13, 10
-          db         13, 10
-          db        "If a pathname is not specified, FIND searches the text"
-          db         " typed at the prompt", 13, 10
+          db        "            Specifies a file to search.", 13, 10, 13, 10
+          db        "If a pathname is not specified, FIND searches the text typed at the prompt", 13, 10
           db        "or piped from another command.", 13, 10, "$"
 %endif
 
@@ -433,7 +457,8 @@ ecrlf2:   db        13, 10, 0
 
 bss:                                    ; This section of memory will be
                                         ; entirely zeroed upon startup.
-matches   equ       $
+retval    equ       $
+matches   equ       retval+1
 linno     equ       matches+2
 
 mode      equ       linno+2
