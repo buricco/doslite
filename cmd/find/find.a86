@@ -27,6 +27,9 @@
 ; OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
 ; ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+; Revision 1.2.1: 2022.0802 usotsuki
+;                 Part of an error being written to stdout instead of stderr
+;
 ; Revision 1.2: 2022.0802 usotsuki
 ;               Wildcard support (if compiled with -DWILDCARD)
 ;
@@ -275,16 +278,14 @@ dofind:   mov       ah, [fname]         ; Use an external file or stdin?
 %endif
           int       0x21
           jnc       .4                  ; Success
-          push      ax
-%ifdef    WILDCARD
-          mov       dx, fnbuild
-%else
-          mov       dx, fname
-%endif
-          call      wrstrc
-          mov       dx, ecolon
-          call      wrstr
-          pop       ax
+;         push      ax
+;%ifdef   WILDCARD
+;         mov       dx, fnbuild
+;%else
+;         mov       dx, fname
+;%endif
+;         call      wrstrc
+;         pop       ax
           cmp       al, 0x12
           je        .1
           cmp       al, 0x02            ; Find error, die screaming
@@ -504,16 +505,14 @@ wcproc:   mov       si, fname           ; Find length of the filename
           jnc       .7
           cmp       al, 0x12            ; Not an error, but out of files
           je        .15
-          push      ax
-%ifdef    WILDCARD
-          mov       dx, fnbuild
-%else
-          mov       dx, fname
-%endif
-          call      wrstrc
-          mov       dx, ecolon
-          call      wrstr
-          pop       ax
+;         push      ax
+;%ifdef   WILDCARD
+;         mov       dx, fnbuild
+;%else
+;         mov       dx, fname
+;%endif
+;         call      wrstrc
+;         pop       ax
 .10:      cmp       al, 0x12            ; "No more files" from findfirst
           je        .11                 ;   = file not found
           cmp       al, 0x02
