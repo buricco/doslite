@@ -65,6 +65,12 @@ V_FLAG    equ       0x40                ; Force verify flag on.
 W_FLAG    equ       0x80                ; Prompt before copying.
 
 ; ============================================================================
+; Other constants
+; ============================================================================
+
+stkmax    equ       1024                ; Size of the stack
+
+; ============================================================================
 ; Entry point from MS-DOS
 ; ============================================================================
 
@@ -87,6 +93,7 @@ okdos:    mov       ah, 0x54            ; GETVFY
           xor       ah, ah              ; Place zero terminators on the input
           mov       ah, fnbuf1          ; filename buffers.
           mov       ah, fnbuf2
+          mov       sp, eof+stkmax      ; Setup stack.
           mov       si, 0x0081          ; Command line pointer, PSP:0081.
           mov       di, fnbuf1          ; Target pointer.
           call      killspc             ; Skip over whitespace.
@@ -266,6 +273,102 @@ okdos:    mov       ah, 0x54            ; GETVFY
 ; ============================================================================
 ; Subroutines
 ; ============================================================================
+
+; ----------------------------------------------------------------------------
+; Memory functions
+; ----------------------------------------------------------------------------
+
+; Take DWORD in DX:BX and normalize it as far as possible.
+
+normaliz: push      ax
+          mov       ax, bx
+          and       ax, 0xFFF0
+          shr       ax, 1
+          shr       ax, 1
+          shr       ax, 1
+          shr       ax, 1
+          add       dx, ax
+          and       bx, 0x000F
+          pop       ax
+          ret
+
+; Set limits of memory.
+; [membase]:0 = beginning of our free space.
+; [memtop]:0 = end of our free space.
+; When comparing memory pointers, normalize them first (see above).
+
+setupmem: push      cs
+          pop       es
+          mov       bx, eof+stkmax
+          mov       cl, 4
+          shr       bx, cl
+          inc       bx
+          mov       ah, 0x4A            ; REALLOC
+          int       0x21
+          jc        .1
+          mov       ah, 0x48            ; MALLOC
+          mov       bx, 0xFFFF          ; This WILL return an error, but DOS
+          int       0x21                ; will put a maximum in BX, so just
+          mov       [memtop], bx        ; retry the call with the new BX.
+          mov       ah, 0x48            ; MALLOC
+          int       0x21
+          jc        .1
+          cmp       word [memtop], 0x2000
+          jb        .1
+          mov       [membase], ax
+          add       [memtop], ax
+.1:       mov       dx, eram
+          jmp       scream
+
+; Mark at pointer: 00 end of input
+
+tok0:     push      bx
+          mov       es, [memptr+2]
+          mov       bx, [memptr]
+          mov       byte [es:bx], 0x00
+          inc       word [memptr]
+          pop       bx
+          push      cs
+          pop       es
+          ret
+
+; Mark at pointer: 01 new directory (DS:DX)
+
+tok1:     push      bx
+          push      cx
+          push      si
+          push      di
+          mov       es, [memptr+2]
+          mov       bx, [memptr]
+          mov       byte [es:bx], 0x01
+          inc       bx
+          xor       cl, cl
+          mov       di, dx
+.1:       cmp       byte [di], 0x00
+          je        .2
+          inc       cl
+          jmp short .1
+.2:       mov       byte [es:bx], cl
+          inc       bx
+          mov       si, dx
+          mov       di, bx
+          xor       ch, ch
+          add       word [memptr], cx
+          cld
+          repnz movsb
+          pop       di
+          pop       si
+          pop       cx
+          pop       bx
+          push      cs
+          pop       es
+          ret
+
+; Mark at pointer: 02 new file (DS:DX) - stub comment
+
+; Mark at pointer: 03 close current file - stub comment
+
+; Mark at pointer: 04 chunk (read from file) - stub comment
 
 ; ----------------------------------------------------------------------------
 ; Bones of the date parsing code.
@@ -580,9 +683,14 @@ switches: db        "ADEMPSVW", 0
 
 tail:
 
-fnbuf1    equ       tail
-fnbuf2    equ       tail+128
-ffblk     equ       fnbuf2+128
+membase   equ       tail
+memtop    equ       membase+2
+memptr    equ       memtop+2
+fnbuf1    equ       memptr+4
+fnbuf2    equ       fnbuf1+128
+fnbuf3    equ       fnbuf2+128
+fnbuf4    equ       fnbuf3+128
+ffblk     equ       fnbuf4+128
 i18ntank  equ       ffblk
 
 bottom    equ       ffblk+48
