@@ -43,6 +43,11 @@
 ; Note: Officially, /E requires /S, but in any versions I am aware of, if /E
 ;       is specified without /S, /S is turned on automatically.
 
+; The concept of TODET is something like streaming a tarball in and out of
+; memory.  XCOPY traditionally loads as many files into memory as possible
+; before writing it out, the result being a speed boost, especially when
+; copying to or from floppies.
+
           cpu       8086
           org       0x0100
 
@@ -366,7 +371,33 @@ tok1:     push      bx
 
 ; Mark at pointer: 02 new file (DS:DX) - stub comment
 
-; Mark at pointer: 03 close current file - stub comment
+; Mark at pointer: 03 close current file
+
+tok3:     push      ax
+          push      bx
+          push      cx
+          push      dx
+          mov       es, [memptr+2]
+          mov       bx, [memptr]
+          mov       byte [es:bx], 0x03
+          inc       word [memptr]
+          mov       ax, 0x5700
+          mov       bx, [iohandle]
+          int       0x21
+          mov       bx, [memptr]
+          mov       word [es:bx], cx
+          add       bx, 2
+          mov       word [es:bx], dx
+          add       bx, 4
+          mov       [memptr], bx
+          mov       ah, 0x3E
+          mov       bx, [iohandle]
+          int       0x21
+          pop       dx
+          pop       cx
+          pop       bx
+          pop       ax
+          ret
 
 ; Mark at pointer: 04 chunk (read from file) - stub comment
 
@@ -686,7 +717,8 @@ tail:
 membase   equ       tail
 memtop    equ       membase+2
 memptr    equ       memtop+2
-fnbuf1    equ       memptr+4
+iohandle  equ       memptr+4
+fnbuf1    equ       iohandle+2
 fnbuf2    equ       fnbuf1+128
 fnbuf3    equ       fnbuf2+128
 fnbuf4    equ       fnbuf3+128
