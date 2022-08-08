@@ -1,6 +1,7 @@
 ; Copyright (C) 1983 Microsoft Corp.
 ; Modifications copyright 2018 John Elliott
 ;           and copyright 2022 S. V. Nickolas.
+; Additional modifications adapted from modifications by C. Masloch
 ;
 ; Permission is hereby granted, free of charge, to any person obtaining a copy
 ; of this software and associated documentation files (the Software), to deal
@@ -36,7 +37,7 @@ const     segment   public byte
 const     ends
 
 data      segment   public byte
-          extrn     hinum:word,lownum:word,assemcnt:byte
+          extrn     error_handler:word,hinum:word,lownum:word,assemcnt:byte
           extrn     assem1:byte,assem2:byte,assem3:byte,assem4:byte,assem5:byte
           extrn     assem6:byte,opbuf:byte,opcode:word,regmem:byte,index:word
           extrn     asmadd:byte,asmsp:word,movflg:byte,segflg:byte,tstflg:byte
@@ -49,7 +50,7 @@ dg        group     code,const,data
 
 code      segment public byte 'code'
 assume    cs:dg,ds:dg,es:dg,ss:dg
-          public    assem
+          public    assem,assemorg
           public    db_oper,dw_oper,assemloop,group2,aa_oper,dcinc_oper
           public    group1,esc_oper,fgroupp,fgroupx,fde_oper,fgroupz
           public    fd9_oper,fgroup,fdb_oper,fgroupb,fgroup3,fgroup3w
@@ -58,7 +59,7 @@ assume    cs:dg,ds:dg,es:dg,ss:dg
           public    tst_oper,ex_oper,get_data16,call_oper
           extrn     inbuf:near,scanb:near,scanp:near,gethx:near,get_address:near
           extrn     default:near,outdi:near,blank:near,printmes:near,tab:near
-
+          extrn     perror:near
 ;
 ;         Line by line assembler
 ;
@@ -71,6 +72,7 @@ assem:    mov       bp,[cssave]         ; Default code segment
           mov       [asmsp],sp          ; Save sp in case of error
 assemloop:
           mov       sp,[asmsp]          ; Restore sp in case of error
+          mov       word ptr [error_handler], offset dg:asmerr
           les       di,dword ptr asmadd ; GET PC
           call      outdi               ; OUTPUT ADDRESS
           call      blank               ; SKIP A SPACE
@@ -79,7 +81,16 @@ assemloop:
           call      inbuf               ; GET A BUFFER
           call      scanb
           jnz       oplook
+          mov       word ptr [error_handler], offset dg:perror
           ret                           ; IF EMPTY JUST RETURN
+
+assemorg: mov       bp, word ptr [asmadd+2]
+          mov       di, offset dg:asmadd ; Default address
+          call      default
+          mov       word ptr [asmadd], dx
+          mov       word ptr [asmadd+2], ax
+          jmp       assemloop
+
 ;
 ;  At this point ds:si points to the opcode mnemonic...
 ;

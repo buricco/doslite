@@ -1,6 +1,7 @@
 ; Copyright (C) 1983 Microsoft Corp.
 ; Modifications copyright 2018 John Elliott
 ;           and copyright 2022 S. V. Nickolas.
+; Additional modifications adapted from modifications by C. Masloch
 ;
 ; Permission is hereby granted, free of charge, to any person obtaining a copy
 ; of this software and associated documentation files (the Software), to deal
@@ -61,7 +62,7 @@ code      segment   public  byte 'code'
           extrn         out_oper:near,push_oper:near,get_data16:near
           extrn         fgroup3:near,fgroup3w:near,fde_oper:near,esc_oper:near
           extrn         aa_oper:near,call_oper:near,fdb_oper:near,pop_oper:near
-          extrn         rotop:near,tst_oper:near,ex_oper:near
+          extrn         rotop:near,tst_oper:near,ex_oper:near,assemorg:near
 
 code      ends
 
@@ -372,6 +373,7 @@ distab    dw        offset dg:addmn,alufromreg
 dbmn      db        "D","B"+80H
           db        "D","W"+80H
           db        ";"+80H
+          db        "OR","G"+80H
 addmn     db        "AD","D"+80H
 adcmn     db        "AD","C"+80H
 submn     db        "SU","B"+80H
@@ -587,6 +589,8 @@ optab     db        11111111b               ; db
           dw        dw_oper
           db        11111111b               ; comment
           dw        assemloop
+          db        11111111b               ; org
+          dw        assemorg
           db        0 * 8                   ; add
           dw        group2
           db        2 * 8                   ; adc

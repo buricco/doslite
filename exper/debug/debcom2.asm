@@ -192,7 +192,7 @@ badreg:
           mov       ax,5200h+'B'            ; BR ERROR
           jmp       err
 flag:
-          cmp       dl,"f"
+          cmp       dl,"F"
           jnz       badreg
           call      dispflags
           mov       al,"-"

@@ -1,6 +1,7 @@
 ; Copyright (C) 1983 Microsoft Corp.
 ; Modifications copyright 2018 John Elliott
 ;           and copyright 2022 S. V. Nickolas.
+; Additional modifications adapted from modifications by C. Masloch
 ;
 ; Permission is hereby granted, free of charge, to any person obtaining a copy
 ; of this software and associated documentation files (the Software), to deal
@@ -26,6 +27,7 @@ include   debequ.inc
 include   dossym.inc
 
 code      segment   public byte 'code'
+          extrn     perror:near
 code      ends
 
 const     segment   public byte
@@ -38,7 +40,6 @@ dg        group     code,const,data
 
 data      segment   public byte
 
-
           public    ptyflag,xnxopt,xnxcmd,extptr,handle,transadd
           public    parserr,asmadd,disadd,discnt,asmsp,index,defdump,deflen
           public    regsave,segsave,offsave,temp,buffer,bytcnt,opcode,aword
@@ -46,9 +47,12 @@ data      segment   public byte
           public    assem1,assem2,assem3,assem4,assem5,assem6,bytebuf,bptab
           public    diflg,siflg,bxflg,bpflg,negflg,numflg,memflg,regflg
           public    movflg,tstflg,segflg,lownum,hinum,f8087,dirflg,dataend
+          public    error_handler
 
+error_handler:
+          dw        perror
 
-ptyflag:  DB        0
+ptyflag:  db        0
 xnxopt:   db        ?                   ; AL OPTION FOR DOS COMMAND
 xnxcmd:   db        ?                   ; DOS COMMAND FOR OPEN_A_FILE TO PERFORM
 extptr:   dw        ?                   ; POINTER TO FILE EXTENSION

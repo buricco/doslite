@@ -1,6 +1,7 @@
 ; Copyright (C) 1983 Microsoft Corp.
 ; Modifications copyright 2018 John Elliott
 ;           and copyright 2022 S. V. Nickolas.
+; Additional modifications adapted from modifications by C. Masloch
 ;
 ; Permission is hereby granted, free of charge, to any person obtaining a copy
 ; of this software and associated documentation files (the Software), to deal
@@ -36,7 +37,7 @@ const     segment   public byte
 const     ends
 
 data      segment   public byte
-          extrn     deflen:word,bytebuf:byte,defdump:byte
+          extrn     deflen:word,bytebuf:byte,defdump:byte,error_handler:word
 data      ends
 
 dg        group     code,const,data
@@ -46,7 +47,7 @@ assume    cs:dg,ds:dg,es:dg,ss:dg
 
           public    hexchk,gethex1,print,dsrange,address,hexin,perror
           public    gethex,get_address,geteol,gethx,perr
-          public    perr,move,dump,_enter,fill,search,default
+          public    perr,move,dump,_enter,fill,search,default,jump_error
           extrn     _out:near,crlf:near,outdi:near,outsi:near,scanp:near
           extrn     scanb:near,blank:near,tab:near,printmes:near,command:near
           extrn     hex:near,backup:near
@@ -78,7 +79,7 @@ range:    call      address
           pop       dx                  ; Low 16 bits of starting addr.
           sub       cx,dx               ; Compute range
           jae       dsrng2
-dsrng1:   jmp       perror              ; Negative range
+dsrng1:   jmp       jump_error          ; Negative range
 dsrng2:   inc       cx                  ; Include last location
           jcxz      dsrng1              ; Wrap around error
           pop       ax                  ; Restore segment
@@ -320,7 +321,8 @@ getlp:    inc       si                  ; Next char in buffer
 gethex:   call      gethx               ; Scan to next parameter
           jmp short gethx2
 gethex1:  call      gethx1
-gethx2:   jc        perror
+gethx2:   jnc       rethx
+          jmp       jump_error
 rethx:    clc
 hxerr:    ret
 
@@ -394,8 +396,11 @@ listlp:   call      listitem            ; Process a parameter
 ; unrecognized parameter and an error.
 
 geteol:   call      scanb               ; Skip blanks
-          jnz       perror              ; Better be a RETURN
+          jnz       jump_error          ; Better be a RETURN
 ret3:     ret
+
+jump_error:
+          jmp       word ptr [error_handler]
 
 ; Command error. SI has been incremented beyond the
 ; command letter so it must decremented for the
@@ -423,13 +428,14 @@ print:    call      printmes
 ; register (DS, ES, SS, CS). Returns with segment in AX, OFFSET in DX.
 
 address:  call      get_address
-          jc        perror
+          jnc       adrerr
+          jmp       jump_error
 adrerr:   stc
           ret
 get_address:
           call      scanp
           mov       al,[si+1]
-          cmp       al,"s"
+          cmp       al,"S"
           jz        segreg
           mov       cx,4
           call      gethx
