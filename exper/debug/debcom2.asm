@@ -1,6 +1,7 @@
 ; Copyright (C) 1983 Microsoft Corp.
 ; Modifications copyright 2018 John Elliott
 ;           and copyright 2022 S. V. Nickolas.
+; Additional modifications adapted from modifications by C. Masloch
 ;
 ; Permission is hereby granted, free of charge, to any person obtaining a copy
 ; of this software and associated documentation files (the Software), to deal
@@ -51,6 +52,9 @@ data      segment   public byte
           extrn     asmadd:byte,disadd:byte,nseg:word,bptab:byte
           extrn     brkcnt:word,tcount:word,xnxcmd:byte,xnxopt:byte
           extrn     aword:byte,extptr:word,handle:word,parserr:byte
+          extrn     zpcount:word
+          extrn     int1save:word,int1saveseg:word
+          extrn     int3save:word,int3saveseg:word
 data      ends
 
 dg        group     code,const,data
@@ -341,8 +345,15 @@ comp:
 ztrace:
 ; just like trace except skips OVER next INT or CALL.
           call      setadd                  ; get potential starting point
+          call      scanp
+          call      hexin
+          mov       dx,1
+          jc        zpstocnt
+          mov       cx,4
+          call      gethex
+zpstocnt: mov       [zpcount],dx
           call      geteol                  ; check for end of line
-          mov       [tcount],1              ; only a single go at it
+zpstep:   mov       [tcount],1              ; only a single go at it
           mov       es,[cssave]             ; point to instruction to execute
           mov       di,[ipsave]             ; include offset in segment
           xor       dx,dx                   ; where to place breakpoint
@@ -410,32 +421,118 @@ ztrace1:  inc       dx
 ; by the parameter using 8086 trace mode. Registers are all
 ; set according to values in save area
 
-trace:
-          call      setadd
+trace:    call      setadd
           call      scanp
           call      hexin
           mov       dx,1
           jc        stocnt
           mov       cx,4
           call      gethex
-stocnt:
-          mov       [tcount],dx
+stocnt:   mov       [tcount],dx
           call      geteol
+step_zp_reset:
+          mov       [zpcount], 1
 step:
+          mov       es,[cssave]         ; point to instruction to execute
+          mov       di,[ipsave]         ; include offset in segment
+          mov       bx, 3               ; default for int3
+          mov       dx, 1               ; default for int3 or into
+          mov       al,es:[di]          ; get the opcode
+          cmp       al, 0CDh
+          je        stepint
+          cmp       al, 0CCh
+          je        stepint_3
+          cmp       al, 0CEh
+          jne       steptrace
+stepint_o:
+          test      byte ptr [_fsave + 1], 8 ; OV ?
+          jz        steptrace           ; no -->
+          inc       bx                  ; = 4
+          jmp       stepint_common
+
+stepint:  mov       bl, byte ptr es:[di + 1] ; get interrupt number
+          inc       dx                  ; = 2
+
+; Note that this doesn't work in a sensible way.
+;
+; In Microsoft's Debug it would trace into the debugger's own interrupt 3
+; handler, unless no steptrace/go/zptrace command had run yet.  In that
+; exceptional case the T command would trace into the prior interrupt 3
+; handler. This is true always for our current source because we restore
+; the original interrupt 3 handler when we are re-entered after running.
+;
+; Both of those are not desirable.
+
+; INP:	es:di = saved cs:ip
+; dx = length of instruction
+; bx = interrupt number
+
+stepint_common:
+          mov       si, word ptr [spsave]
+          mov       ds, word ptr [sssave]
+          add       di, dx              ; = new ip after interrupt
+          dec       si
+          dec       si
+          mov       ax, word ptr cs:[_fsave]
+          mov       word ptr [si], ax   ; store flags
+          dec       si
+          dec       si
+          mov       word ptr [si], es   ; store cs
+          dec       si
+          dec       si
+          mov       word ptr [si], di   ; store new ip
+          xor       ax, ax
+          mov       ds, ax              ; => IVT
+          add       bx, bx
+          add       bx, bx              ; -> IVT entry of our interrupt
+          mov       ax, word ptr ds:[bx]
+          mov       word ptr cs:[ipsave], ax ; save new ip
+          mov       ax, word ptr ds:[bx + 2]
+          push      cs
+          pop       ds                  ; reset our DS
+          mov       word ptr [cssave], ax ; save new cs
+          mov       word ptr [spsave], si ; save new sp
+          and       byte ptr [_fsave + 1], not 3
+                                        ; clear IF and TF
+j_stepint_continue:
+          push      cs
+          pop       es                  ; reset our ES
+          jmp       stepint_continue
+
+
+; New: Just skip past the int3 instruction
+;  if we encounter it in the T command.
+
+stepint_3:
+          inc       word ptr [ipsave]
+          jmp       j_stepint_continue
+
+steptrace:
           mov       [brkcnt],0
           or        byte ptr [_fsave+1],1
-dexit:
-          mov       bx,[user_proc_pdb]
+dexit:    mov       bx,[user_proc_pdb]
           mov       ah,set_current_pdb
           int       21h
+          call      setint
+restoredint:
+          jmp       restoredint_actual
+setint:   pop       ax                      ; discard near return address
           push      ds
           xor       ax,ax
           mov       ds,ax
+          cli
+          mov       ax, word ptr ds:[4]
+          mov       word ptr cs:[int1save], ax
+          mov       ax, word ptr ds:[6]
+          mov       word ptr cs:[int1saveseg], ax
+          mov       ax, word ptr ds:[12]
+          mov       word ptr cs:[int3save], ax
+          mov       ax, word ptr ds:[14]
+          mov       word ptr cs:[int3saveseg], ax
           mov       word ptr ds:[12],offset dg:breakfix ; Set vector 3--breakpoint instruction
           mov       word ptr ds:[14],cs
           mov       word ptr ds:[4],offset dg:reenter   ; Set vector 1--Single step
           mov       word ptr ds:[6],cs
-          cli
 
           if        setcntc
           mov       word ptr ds:[8ch],offset dg:contc   ; Set vector 23H (CTRL-C)
@@ -461,17 +558,20 @@ dexit:
           push      [ipsave]
           mov       ds,[dssave]
           iret
-step1:
-          call      crlf
+step1:    call      crlf
           call      dispreg
-          jmp       short step
+          jmp short step_zp_reset
+
+zpstep1:  call      crlf
+          call      dispreg
+          jmp       zpstep
 
 ; Re-entry point from CTRL-C. Top of stack has address in 86-DOS for
 ; continuing, so we must pop that off.
 
 contc:
           add       sp,6
-          jmp       short reenterreal
+          jmp short reenterreal
 
 ; Re-entry point from breakpoint. Need to decrement instruction
 ; pointer so it points to location where breakpoint actually
@@ -567,13 +667,24 @@ reenterreal:
           push      ds
           xor       ax,ax
           mov       ds,ax
+          cli
 
           if        setcntc
           mov       word ptr ds:[8ch],offset dg:dabort  ; Set Ctrl-C vector
           mov       word ptr ds:[8eh],cs
           endif
 
+          mov       ax, word ptr cs:[int1save]
+          mov       word ptr ds:[4], ax
+          mov       ax, word ptr cs:[int1saveseg]
+          mov       word ptr ds:[6], ax
+          mov       ax, word ptr cs:[int3save]
+          mov       word ptr ds:[12], ax
+          mov       ax, word ptr cs:[int3saveseg]
+          mov       word ptr ds:[14], ax
           pop       ds
+          jmp       restoredint
+restoredint_actual:
           sti
           cld
           mov       ah,get_current_pdb
@@ -582,6 +693,7 @@ reenterreal:
           mov       bx,ds
           mov       ah,set_current_pdb
           int       21h
+stepint_continue:
           dec       [tcount]
           jz        checkdisp
           jmp       step1
@@ -590,19 +702,20 @@ checkdisp:
           mov       cx,[brkcnt]
           jcxz      shoreg
           push      es
-clearbp:
-          les       di,dword ptr [si]
+clearbp:  les       di,dword ptr [si]
           add       si,4
           movsb
           loop      clearbp
           pop       es
-shoreg:
+shoreg:   dec       [zpcount]
+          jz        notzpcount
+          jmp       zpstep1
+notzpcount:
           call      crlf
           call      dispreg
           jmp       command
 
-setadd:
-          mov       bp,[cssave]
+setadd:   mov       bp,[cssave]
           call      scanp
           cmp       byte ptr [si],'='
           jnz       ret$5
@@ -615,12 +728,10 @@ ret$5:    ret
 ; Jump to program, setting up registers according to the
 ; save area. up to 10 breakpoint addresses may be specified.
 
-go:
-          call      setadd
+go:       call      setadd
           xor       bx,bx
           mov       di,offset dg:bptab
-go1:
-          call      scanp
+go1:      call      scanp
           jz        dexec
           mov       bp,[cssave]
           call      address
@@ -632,21 +743,19 @@ go1:
           jnz       go1
           mov       ax,5000h+'B'            ; bp error
           jmp       err
-dexec:
-          mov       [brkcnt],bx
+dexec:    mov       [brkcnt],bx
           mov       cx,bx
           jcxz      nobp
           mov       di,offset dg:bptab
           push      ds
-setbp:
-          lds       si,es:dword ptr [di]
+setbp:    lds       si,es:dword ptr [di]
           add       di,4
           movsb
           mov       byte ptr [si-1],0cch
           loop      setbp
           pop       ds
-nobp:
-          mov       [tcount],1
+nobp:     mov       [tcount],1
+          mov       [zpcount],1
           jmp       dexit
 
 skip_file:
@@ -657,16 +766,13 @@ find_delim:
           jz        gotdelim
           call      delim2
           jnz       find_delim
-gotdelim:
-          dec       si
+gotdelim: dec       si
           ret
 
-prepname:
-          mov       es,dssave
+prepname: mov       es,dssave
           push      si
           mov       di,81h
-comtail:
-          lodsb
+comtail:  lodsb
           stosb
           cmp       al,13
           jnz       comtail

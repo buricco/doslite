@@ -47,13 +47,20 @@ data      segment   public byte
           public    assem1,assem2,assem3,assem4,assem5,assem6,bytebuf,bptab
           public    diflg,siflg,bxflg,bpflg,negflg,numflg,memflg,regflg
           public    movflg,tstflg,segflg,lownum,hinum,f8087,dirflg,dataend
-          public    error_handler
+          public    error_handler,zpcount
+          public    int1save,int1saveseg,int3save,int3saveseg
 
 error_handler:
           dw        perror
 
 ptyflag:  db        0
 xnxopt:   db        ?                   ; AL OPTION FOR DOS COMMAND
+int1save: dw        ?
+int1saveseg:
+          dw        ?
+int3save: dw        ?
+int3saveseg:
+          dw        ?
 xnxcmd:   db        ?                   ; DOS COMMAND FOR OPEN_A_FILE TO PERFORM
 extptr:   dw        ?                   ; POINTER TO FILE EXTENSION
 handle:   dw        ?                   ; CURRENT HANDLE
@@ -85,6 +92,7 @@ nseg:     dw        ?
 opbuf:    db        opbuflen dup (?)
 brkcnt:   dw        ?                   ; Number of breakpoints
 tcount:   dw        ?                   ; Number of steps to trace
+zpcount:  dw        ?                   ; Number of steps to zp trace
 assemcnt: db        ?                   ; preserve order of assemcnt and assem1
 assem1:   db        ?
 assem2:   db        ?
