@@ -84,6 +84,12 @@ Experimental Folder
     This is another "breaker" utility that I need working before I start
     uploading DOSLITE to social version control.
 
+  HELPCOM
+  -------
+  
+    The help utility being written for PC DOS/RE, because QBASIC is overkill.
+    Nowhere near done.
+
   MEM
   ---
   
