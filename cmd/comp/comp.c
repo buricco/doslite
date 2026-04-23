@@ -235,26 +235,31 @@ int dos_write (int handle, const void *buf, int len)
 
 long dos_lseek (int handle, long pos, char mode)
 {
- short a, b;
- long c;
+ unsigned short a, b;
+ unsigned long c;
  a=(pos>>16);
  b=(pos&0xFFFF);
 
- _asm mov ah, 0x42;
- _asm mov al, mode;
- _asm mov bx, handle;
- _asm mov cx, a;
- _asm mov dx, b;
- _asm int 0x21;
- _asm mov a, dx;
- _asm mov b, ax;
- _asm lahf;
- _asm mov flags, ah;
- if (flags&1)
+ flags=0;
+ _asm
  {
-  _asm mov dos_errno, ax;
-  return -1;
- }
+  mov ah, 0x42;
+  mov al, mode;
+  mov bx, handle;
+  mov cx, a;
+  mov dx, b;
+  int 0x21;
+  jnc lseekok;
+  mov flags, 0xFF;
+  mov dos_errno, ax;
+  jmp short lseekend;
+lseekok:
+  mov a, dx;
+  mov b, ax;
+lseekend:
+ };
+ if (flags) return -1;
+
  c=a;
  c<<=16;
  c|=b;
